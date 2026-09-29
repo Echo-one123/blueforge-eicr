@@ -89,6 +89,7 @@ function normaliseJob(job){
   if (!job.type) job.type = "EICR";
   if (!job.work) job.work = { nature:"", desc:"", extent:"", maxDemand:"", departures:"", existing:"", notify:{}, bcRef:"", sameSigner:"Yes", designer:"", designDate:"", constructor:"", constructDate:"" };
   if (!job.work.notify) job.work.notify = {};
+  ensurePhotos(job);
   if (job.company) { const c = {}; COMPANY_KEYS.forEach(k => c[k] = job.company[k] ?? settings[k]); job.company = c; }
   Object.keys(job.insp || {}).forEach(k => { if (k.includes(".")) { job.insp[k.replace(".","_")] = job.insp[k]; delete job.insp[k]; } });
   return job;
@@ -440,7 +441,7 @@ let saveState = "saved";
 const LS = "bf-eicr-v1", IDB_NAME = "bf-eicr", IDB_STORE = "kv";
 let idb = null, writeChain = Promise.resolve(), persistTimer = null;
 const liveJobs = () => jobs.filter(x => !x.deleted);
-function idbOpen(){ return new Promise(res => { try { const r = indexedDB.open(IDB_NAME, 1); r.onupgradeneeded = () => r.result.createObjectStore(IDB_STORE); r.onsuccess = () => res(r.result); r.onerror = () => res(null); r.onblocked = () => res(null); } catch(e){ res(null); } }); }
+function idbOpen(){ return new Promise(res => { try { const r = indexedDB.open(IDB_NAME, 2); r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains(IDB_STORE)) d.createObjectStore(IDB_STORE); if (!d.objectStoreNames.contains("photos")) d.createObjectStore("photos"); }; r.onsuccess = () => res(r.result); r.onerror = () => res(null); r.onblocked = () => res(null); } catch(e){ res(null); } }); }
 function idbGet(k){ return new Promise(res => { if (!idb) return res(undefined); try { const q = idb.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); } catch(e){ res(undefined); } }); }
 function idbSet(k, v){ return new Promise(res => { if (!idb) return res(false); try { const tx = idb.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(v, k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); tx.onabort = () => res(false); } catch(e){ res(false); } }); }
 function lsRead(){ try { return JSON.parse(localStorage.getItem(LS) || "{}"); } catch(e){ return {}; } }
@@ -476,7 +477,7 @@ function statusHtml(){
   else if (syncState.state === "syncing") sync = " · Syncing…";
   else if (navigator.onLine === false || syncState.state === "offline") { sync = " · Offline – will sync when back online"; if (!cls) cls = "warn"; }
   else if (syncState.state === "error") { sync = " · Sync problem – " + syncState.err; cls = cls || "warn"; }
-  else sync = " · Synced " + agoText(settings.lastSync);
+  else sync = " · Synced " + agoText(settings.lastSync) + (photoUploadsPending ? ` · ${photoUploadsPending} photos still uploading` : "");
   return `<div class="status ${cls}" id="savestate" role="status"><span class="dot"></span><span style="min-width:0">${esc(txt + sync)}</span></div>`;
 }
 
@@ -489,6 +490,7 @@ async function init(){
   if (!settings.deviceId) settings.deviceId = uid();
   if (!settings.sendKey) settings.sendKey = "bf-" + Array.from({length:3}, () => Math.random().toString(36).slice(2,10)).join("");
   writeNow();
+  await initPhotoQueue();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e){}
   if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
     try {
@@ -554,6 +556,8 @@ async function syncNow(){
         else if ((g.updated || 0) > (jobs[k].updated || 0)) { jobs[k] = g; changed = true; if (g.id === view.jobId) openChanged = true; }
       });
     }
+    try { if (await syncPhotos()) syncAgain = true; }
+    catch(e){ throw new Error("photos: " + String(e.message || e)); }
     settings.lastSync = Date.now();
     lsWrite();
     setSync("idle");
@@ -564,6 +568,176 @@ async function syncNow(){
   syncing = false;
   processQueue();
   if (syncAgain) { syncAgain = false; scheduleSync(1500); }
+}
+
+/* ------------------------------------------------------------------ photos
+   Photos are stored separately from the job (IndexedDB "photos" store) and referenced by id:
+   job.photos.slots[key] = [ids], job.photos.na[key] = "reason", obs.photos = [ids], job.photos.other = [ids]. */
+const photoCache = new Map();          // id -> dataURL (in memory for the jobs we've looked at)
+let photoUploadsPending = 0;
+const pendingUploads = new Set();      // photo ids taken on this device that haven't reached Drive yet
+async function initPhotoQueue(){ const recs = await photoAll(); recs.forEach(r => { if (!r.uploaded) pendingUploads.add(r.id); }); photoUploadsPending = pendingUploads.size; }
+function photoKeys(){ return new Promise(res => { try { const st = photoTx("readonly"); if (!st) return res([]); const q = st.getAllKeys(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); } catch(e){ res([]); } }); }
+function ensurePhotos(job){ if (!job.photos) job.photos = { slots:{}, na:{}, other:[] }; if (!job.photos.slots) job.photos.slots = {}; if (!job.photos.na) job.photos.na = {}; if (!job.photos.other) job.photos.other = []; (job.obs || []).forEach(o => { if (!o.photos) o.photos = []; }); return job.photos; }
+function requiredSlots(job){
+  const s = [["supply","Supply head / cut-out"],["mainfuse","Main (supply) fuse"],["earthing","Earthing arrangement (main earthing terminal / conductor)"]];
+  (job.boards || []).forEach(b => { s.push(["b:" + b.id + ":on", `${b.ref || "Board"} – cover on`]); s.push(["b:" + b.id + ":off", `${b.ref || "Board"} – cover off`]); });
+  return s;
+}
+function slotLabel(job, key){ const r = requiredSlots(job).find(x => x[0] === key); return r ? r[1] : key; }
+function allPhotoIds(job){
+  const p = ensurePhotos(job), ids = [];
+  Object.values(p.slots).forEach(a => ids.push(...(a || [])));
+  ids.push(...(p.other || []));
+  (job.obs || []).forEach(o => ids.push(...(o.photos || [])));
+  return ids;
+}
+function missingPhotos(job){
+  const p = ensurePhotos(job);
+  return requiredSlots(job).filter(([k]) => !(p.slots[k] || []).length && !String(p.na[k] || "").trim());
+}
+function photoTx(mode){ return idb && idb.objectStoreNames.contains("photos") ? idb.transaction("photos", mode).objectStore("photos") : null; }
+function photoPut(rec){ return new Promise(res => { try { const st = photoTx("readwrite"); if (!st) return res(false); const q = st.put(rec, rec.id); q.onsuccess = () => res(true); q.onerror = () => res(false); } catch(e){ res(false); } }); }
+function photoGet(id){ return new Promise(res => { try { const st = photoTx("readonly"); if (!st) return res(null); const q = st.get(id); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); } catch(e){ res(null); } }); }
+function photoAll(){ return new Promise(res => { try { const st = photoTx("readonly"); if (!st) return res([]); const q = st.getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); } catch(e){ res([]); } }); }
+function photoDel(id){ return new Promise(res => { try { const st = photoTx("readwrite"); if (!st) return res(false); const q = st.delete(id); q.onsuccess = () => res(true); q.onerror = () => res(false); } catch(e){ res(false); } }); }
+async function loadJobPhotos(job){
+  if (!job) return;
+  const want = allPhotoIds(job).filter(id => !photoCache.has(id));
+  if (job.example) return;
+  let got = false;
+  for (const id of want){ const r = await photoGet(id); if (r && r.data) { photoCache.set(id, r.data); got = true; } }
+  if (got && view.screen === "job" && view.jobId === job.id && !isEditing()) rerender();
+}
+function compressImage(file){
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      try {
+        const max = 1600, sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const w = Math.max(1, Math.round(img.naturalWidth * sc)), h = Math.max(1, Math.round(img.naturalHeight * sc));
+        const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+        const ctx = cv.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        resolve({ data: cv.toDataURL("image/jpeg", 0.72), w, h });
+      } catch(e){ URL.revokeObjectURL(url); reject(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("That file isn't a photo this device can read.")); };
+    img.src = url;
+  });
+}
+async function addPhotos(target, files){
+  const job = j(); if (!job || job.example || !files || !files.length) return;
+  const p = ensurePhotos(job);
+  let added = 0, err = "";
+  for (const f of Array.from(files)){
+    try {
+      const c = await compressImage(f);
+      const id = uid();
+      const rec = { id, jobId: job.id, data: c.data, w: c.w, h: c.h, created: Date.now(), uploaded: false };
+      await photoPut(rec); photoCache.set(id, c.data); pendingUploads.add(id); photoUploadsPending = pendingUploads.size;
+      if (target.startsWith("obs:")) { const o = job.obs.find(x => x.id === target.slice(4)); if (o) { o.photos = o.photos || []; o.photos.push(id); } }
+      else if (target === "other") p.other.push(id);
+      else { (p.slots[target] = p.slots[target] || []).push(id); delete p.na[target]; }
+      added++;
+    } catch(e){ err = String(e.message || e); }
+  }
+  if (added) { markDirty(job); scheduleSync(2000); }
+  rerender();
+  if (err) toast(err);
+}
+function removePhoto(id){
+  const job = j(); if (!job) return;
+  const p = ensurePhotos(job);
+  Object.keys(p.slots).forEach(k => p.slots[k] = (p.slots[k] || []).filter(x => x !== id));
+  p.other = p.other.filter(x => x !== id);
+  job.obs.forEach(o => o.photos = (o.photos || []).filter(x => x !== id));
+  (job.photoDeletes = job.photoDeletes || []).push(id);
+  photoDel(id); photoCache.delete(id);
+  markDirty(job);
+}
+function toast(msg){ let t = document.getElementById("toast"); if (!t) { t = document.createElement("div"); t.id = "toast"; t.className = "toast"; document.body.appendChild(t); } t.textContent = msg; t.hidden = false; clearTimeout(t._h); t._h = setTimeout(() => t.hidden = true, 4000); }
+function thumbs(ids, target){
+  const cells = (ids || []).map(id => { const src = photoCache.get(id);
+    return `<button type="button" class="thumb" data-photo="${esc(id)}" aria-label="View photo">${src ? `<img src="${src}" alt="">` : `<span>Not on this device yet</span>`}</button>`; }).join("");
+  const add = curJob().example ? "" : `<label class="thumb add" for="ph-${esc(target)}">＋<span>Photo</span></label><input type="file" id="ph-${esc(target)}" data-photo-target="${esc(target)}" accept="image/*" capture="environment" multiple hidden>`;
+  return `<div class="thumbs">${cells}${add}</div>`;
+}
+function tabPhotos(){
+  const job = j(), p = ensurePhotos(job), miss = missingPhotos(job);
+  const slot = ([k, l]) => `<div class="slot ${(p.slots[k] || []).length || String(p.na[k] || "").trim() ? "done" : ""}">
+    <div class="row"><b>${esc(l)}</b><span class="spacer"></span>${(p.slots[k] || []).length ? pill("pass", (p.slots[k].length) + " photo" + (p.slots[k].length === 1 ? "" : "s")) : String(p.na[k] || "").trim() ? pill("none","Not photographed") : pill("check","Required")}</div>
+    ${thumbs(p.slots[k], k)}
+    ${(p.slots[k] || []).length ? "" : `<details class="more"${p.na[k] ? " open" : ""}><summary>Can't photograph this?</summary><div>${field("Reason", "job.photos.na." + k, {ph:"e.g. Meter cupboard locked – no access"})}</div></details>`}
+  </div>`;
+  const obsWith = job.obs.filter(o => (o.photos || []).length);
+  return `<div class="card"><h2>Required photos <span class="count">${requiredSlots(job).length - miss.length} / ${requiredSlots(job).length}</span></h2>
+    <div class="muted small">Supply head, main fuse, earthing, and every board with the cover on and off. Photos are shrunk to save space and sync to the Photos folder in your Drive.</div></div>
+  <div class="card"><h2>Supply &amp; earthing</h2>${requiredSlots(job).slice(0,3).map(slot).join("")}</div>
+  ${job.boards.map(b => `<div class="card"><h2>${esc(b.ref || "Board")}${b.location ? ` <span class="count">${esc(b.location)}</span>` : ""}</h2>${[["b:"+b.id+":on", "Cover on"],["b:"+b.id+":off","Cover off"]].map(slot).join("")}</div>`).join("")}
+  <div class="card"><h2>Other photos</h2>${thumbs(p.other, "other")}</div>
+  ${typeOf(job) === "EICR" ? `<div class="card"><h2>Defect photos</h2><div class="muted small">Add photos to each observation on the Report tab – they print next to it.</div>
+    ${obsWith.length ? obsWith.map(o => `<div class="small"><b>${esc(o.code || "–")}</b> ${esc(o.text.slice(0, 80))} – ${o.photos.length} photo${o.photos.length === 1 ? "" : "s"}</div>`).join("") : `<div class="muted small">None yet.</div>`}</div>` : ""}`;
+}
+function openViewer(id){
+  const job = j(); const src = photoCache.get(id);
+  let v = document.getElementById("viewer");
+  if (!v) { v = document.createElement("div"); v.id = "viewer"; v.className = "viewer"; document.body.appendChild(v); }
+  v.innerHTML = `<div class="vbar"><button class="btn ghost sm" data-viewer="close">Close</button><span class="spacer"></span>${job && !job.example ? `<button class="btn danger sm" data-viewer="del" data-id="${esc(id)}">Delete photo</button>` : ""}</div>
+    <div class="vimg">${src ? `<img src="${src}" alt="Photo">` : `<div class="muted">This photo hasn't downloaded to this device yet.</div>`}</div>`;
+  v.hidden = false;
+}
+document.addEventListener("change", async e => {
+  const inp = e.target.closest && e.target.closest("[data-photo-target]");
+  if (!inp) return;
+  const files = inp.files; await addPhotos(inp.dataset.photoTarget, files); inp.value = "";
+});
+document.addEventListener("click", e => {
+  const t = e.target.closest("[data-photo]");
+  if (t) { openViewer(t.dataset.photo); return; }
+  const vb = e.target.closest("[data-viewer]");
+  if (vb) { const v = document.getElementById("viewer");
+    if (vb.dataset.viewer === "del") { if (vb.dataset.confirm) { removePhoto(vb.dataset.id); v.hidden = true; rerender(); } else { vb.dataset.confirm = "1"; vb.textContent = "Tap again to delete"; } }
+    else v.hidden = true; }
+});
+async function syncPhotos(){
+  // upload photos taken on this device, then download photos other devices have taken (a few per round so it never blocks)
+  let budget = 8;
+  const local = new Set(await photoKeys());
+  const pending = [...pendingUploads]; let up = 0;
+  for (const id of pending){
+    if (budget-- <= 0) break;
+    const r = await photoGet(id);
+    if (!r) { pendingUploads.delete(id); continue; }
+    await api("putPhoto", { id: r.id, jobId: r.jobId, data: r.data.split(",")[1] });
+    r.uploaded = true; await photoPut(r); pendingUploads.delete(id); up++;
+  }
+  const deletes = [];
+  for (const job of jobs){ if (job.photoDeletes && job.photoDeletes.length) deletes.push(...job.photoDeletes.map(id => ({job, id}))); }
+  for (const d of deletes.slice(0, 20)){ try { await api("delPhoto", { id: d.id }); } catch(e){} d.job.photoDeletes = d.job.photoDeletes.filter(x => x !== d.id); }
+  const want = [];
+  liveJobs().forEach(job => allPhotoIds(job).forEach(id => { if (!local.has(id)) want.push({id, jobId: job.id}); }));
+  let got = 0;
+  for (const w of want){
+    if (budget-- <= 0) break;
+    try { const o = await api("getPhoto", { id: w.id }); if (o.data) { const data = "data:image/jpeg;base64," + o.data; await photoPut({ id: w.id, jobId: w.jobId, data, created: Date.now(), uploaded: true }); photoCache.set(w.id, data); got++; } } catch(e){ /* not uploaded yet by the other device */ }
+  }
+  photoUploadsPending = pendingUploads.size;
+  if (got && view.screen === "job" && !isEditing()) rerender();
+  return (up > 0 && pendingUploads.size > 0) || (got > 0 && want.length > got);
+}
+async function photosForBackup(){ const recs = await photoAll(); const out = {}; const ids = new Set(jobs.flatMap(allPhotoIds)); recs.forEach(r => { if (ids.has(r.id)) out[r.id] = {data: r.data, jobId: r.jobId}; }); return out; }
+function photoHtml(ids, caption){
+  const imgs = (ids || []).map(id => photoCache.get(id) ? `<figure><img src="${photoCache.get(id)}" alt=""><figcaption>${esc(caption)}</figcaption></figure>` : "").join("");
+  return imgs;
+}
+function photosSectionHtml(job, withObs){
+  const p = ensurePhotos(job);
+  const req = requiredSlots(job).map(([k, l]) => (p.slots[k] || []).length ? photoHtml(p.slots[k], l) : String(p.na[k] || "").trim() ? `<figure class="na"><div>Not photographed</div><figcaption>${esc(l)} – ${esc(p.na[k])}</figcaption></figure>` : "").join("");
+  const other = photoHtml(p.other, "Other");
+  const obs = withObs ? job.obs.map((o, i) => photoHtml(o.photos, `Observation ${i + 1} (${o.code || "–"}): ${o.text.slice(0, 70)}`)).join("") : "";
+  if (!req && !other && !obs) return "";
+  return `<section style="break-before:page"><h2>Photographs</h2><div class="photos">${obs}${req}${other}</div></section>`;
 }
 
 /* ------------------------------------------------------------------ sending to the office */
@@ -591,6 +765,7 @@ ${t !== "MW" ? `<tr><td><b>Next inspection due</b></td><td>${esc(ukDate(s.nextDu
 }
 function jobBackup(job){ return JSON.stringify({app:"blueforge-eicr", version:2, saved:new Date().toISOString(), jobs:[job]}); }
 async function sendJob(job){
+  await loadJobPhotos(job);
   await api("send", { to: settings.officeEmail, subject: reportSubject(job), body: reportBody(job),
     reportHtml: exportHtml(job), reportName: fileName(job, "html"), pdfName: fileName(job, "pdf"),
     backup: jobBackup(job), backupName: fileName(job, "json") });
@@ -618,6 +793,7 @@ async function shareToEmail(job){
 }
 async function finishAndSend(){
   const job = j(); if (!job || job.example) return;
+  await loadJobPhotos(job);
   const copies = [{name: fileName(job, "html"), text: exportHtml(job), type: "text/html"}, {name: fileName(job, "json"), text: jobBackup(job), type: "application/json"}];
   job.finishedAt = Date.now();
   const auto = settings.sendUrl && settings.autoSend !== "No";
@@ -695,6 +871,24 @@ function doPost(e) {
       (d.ids || []).forEach(function (id) { var f = file_(data2, id + ".json"); if (f) out.push(JSON.parse(f.getBlob().getDataAsString())); });
       return reply({ok: true, jobs: out});
     }
+    if (action === "putPhoto") {
+      if (!/^[a-z0-9]+$/i.test(d.id || "")) return reply({ok: false, error: "Bad photo id"});
+      var photos = sub_("Photos"), name = d.id + ".jpg";
+      var blob = Utilities.newBlob(Utilities.base64Decode(d.data), "image/jpeg", name);
+      var existing = file_(photos, name); if (existing) existing.setTrashed(true);
+      photos.createFile(blob).setDescription("job " + (d.jobId || ""));
+      return reply({ok: true});
+    }
+    if (action === "getPhoto") {
+      var f2 = file_(sub_("Photos"), (d.id || "") + ".jpg");
+      if (!f2) return reply({ok: false, error: "Photo not uploaded yet"});
+      return reply({ok: true, data: Utilities.base64Encode(f2.getBlob().getBytes())});
+    }
+    if (action === "delPhoto") {
+      var f3 = file_(sub_("Photos"), (d.id || "") + ".jpg");
+      if (f3) f3.setTrashed(true);
+      return reply({ok: true});
+    }
     if (action === "send") {
       var files = [], pdf = null;
       try { pdf = Utilities.newBlob(d.reportHtml, "text/html", "report.html").getAs("application/pdf").setName(d.pdfName); files.push(pdf); } catch (err) {}
@@ -770,6 +964,7 @@ const icon = n => ({
   supply:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>',
   circuits:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8v4M11 8v4M15 8v4M7 16h10"/></svg>',
   inspect:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h10M4 12h10M4 18h10"/><path d="m16 6 2 2 3-4M16 18l2 2 3-4"/></svg>',
+  photos:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
   cert:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16"/><path d="M14.5 4.5l5 5L9 20H4v-5z"/></svg>',
   report:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 3 20h18z"/><path d="M12 10v4M12 17v.5"/></svg>'
 }[n]);
@@ -938,16 +1133,17 @@ function renderSettings(){
 }
 
 const TABS = {
-  EICR: [["job","Job"],["supply","Supply"],["circuits","Circuits"],["inspect","Inspect"],["report","Report"]],
-  EIC:  [["job","Work"],["supply","Supply"],["circuits","Circuits"],["inspect","Inspect"],["cert","Certify"]],
-  MW:   [["job","Work"],["supply","Supply"],["circuits","Circuit"],["cert","Certify"]]
+  EICR: [["job","Job"],["supply","Supply"],["circuits","Circuits"],["inspect","Inspect"],["photos","Photos"],["report","Report"]],
+  EIC:  [["job","Work"],["supply","Supply"],["circuits","Circuits"],["inspect","Inspect"],["photos","Photos"],["cert","Certify"]],
+  MW:   [["job","Work"],["supply","Supply"],["circuits","Circuit"],["photos","Photos"],["cert","Certify"]]
 };
 function renderJob(){
   const job = curJob();
   const t = typeOf(job);
   if (!TABS[t].some(x => x[0] === view.tab)) view.tab = "job";
   if (view.tab === "circuits" && curCirc()) return renderCircuit();
-  const body = { job: t === "EICR" ? tabJob : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, report:tabReport, cert:tabCert }[view.tab]();
+  loadJobPhotos(job);
+  const body = { job: t === "EICR" ? tabJob : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert }[view.tab]();
   return `<header class="top"><button class="iconbtn" data-act="home" aria-label="All jobs">←</button><h1>${esc(jobTitle(job) === "Untitled job" ? "New " + TYPES[t] : jobTitle(job))}<span class="sub">${job.example ? "Example – not saved" : esc(TYPES[t]) + (job.reportNo ? " · " + esc(job.reportNo) : "")}</span></h1></header>
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example report – edits aren't saved</div>` : statusHtml()}
   ${job.handoff && !job.sig && settings.role !== "Tester" && view.tab === "job" ? `<main style="padding-bottom:0"><div class="warnline">Tested by ${esc(job.handoff.by)} and sent for sign-off ${esc(agoText(job.handoff.at))}. Check it through, then sign on the ${t === "EICR" ? "Report" : "Certify"} tab.</div></main>` : ""}
@@ -960,7 +1156,7 @@ function renderTabs(){
   const job = curJob(), s = jobSummary(job), t = TABS[typeOf(job)];
   const warn = s.unwrittenFails.length + s.coded.length + (typeOf(job) !== "EICR" ? s.fails.length : 0);
   nav.hidden = false;
-  nav.innerHTML = `<div class="in" style="grid-template-columns:repeat(${t.length},1fr)">${t.map(([k,l]) => `<button class="tab" data-tab="${k}" ${view.tab === k ? 'aria-current="page"' : ""}>${icon(k)}<span>${l}${(k === "report" || k === "cert") && warn ? `<span class="badge">${warn}</span>` : ""}</span></button>`).join("")}</div>`;
+  nav.innerHTML = `<div class="in" style="grid-template-columns:repeat(${t.length},1fr)">${t.map(([k,l]) => `<button class="tab" data-tab="${k}" ${view.tab === k ? 'aria-current="page"' : ""}>${icon(k)}<span>${l}${(k === "report" || k === "cert") && warn ? `<span class="badge">${warn}</span>` : ""}${k === "photos" && missingPhotos(job).length ? `<span class="badge">${missingPhotos(job).length}</span>` : ""}</span></button>`).join("")}</div>`;
 }
 
 /* ---------------- EIC / Minor Works: the work tab */
@@ -1002,6 +1198,7 @@ function tabCert(){
   s.fails.forEach(f => problems.push(`<div class="errline">${esc(f.b.ref)} circuit ${esc(f.c.no)} (${esc(f.c.desc || "no description")}) has failed a test.</div>`));
   s.inspFails.forEach(([id,q]) => problems.push(`<div class="errline">Inspection ${esc(id)} marked ✗ – ${esc(q)}.</div>`));
   s.incomplete.forEach(f => problems.push(`<div class="warnline">${esc(f.b.ref)} circuit ${esc(f.c.no)} (${esc(f.c.desc || "no description")}) – ${esc(f.why)}</div>`));
+  if (missingPhotos(job).length) problems.push(`<div class="warnline">${missingPhotos(job).length} required photo${missingPhotos(job).length === 1 ? "" : "s"} missing – see the Photos tab.</div>`);
   if (!s.total) problems.push(`<div class="warnline">No circuits added yet – add them on the ${t === "MW" ? "Circuit" : "Circuits"} tab.</div>`);
   if (s.untested) problems.push(`<div class="warnline">${s.untested} circuit${s.untested === 1 ? " has" : "s have"} no test results yet.</div>`);
   if (NOTIFY.some(([k]) => w.notify[k] === "Yes") && !w.bcRef) problems.push(`<div class="warnline">Notifiable work – add the building control reference on the Work tab.</div>`);
@@ -1034,10 +1231,12 @@ function finishCard(job){
   const main = tester
     ? `<button class="btn block" data-act="handoff">${job.handoff ? "Send for sign-off again" : "Send for sign-off"}</button>
        <div class="muted small">${job.handoff ? `Sent ${esc(agoText(job.handoff.at))}. ` : ""}${settings.sendUrl ? `It syncs to ${esc(job.inspector || settings.signOffName)} automatically when you have signal.` : "Sync isn't set up on this phone – set it up in ⚙ so the job reaches the inspector, or use Share job file below."}</div>
+       ${missingPhotos(job).length ? `<div class="warnline">${missingPhotos(job).length} required photo${missingPhotos(job).length === 1 ? "" : "s"} still to take – see the Photos tab.</div>` : ""}
        <button class="btn ghost sm" data-act="shareJob">Share job file</button>`
     : (() => { const blockers = [];
         if (!job.sig) blockers.push("sign the declaration");
         if (t !== "EICR" && jobSummary(job).status !== "pass") blockers.push("get every circuit tested and passing");
+        const mp = missingPhotos(job).length; if (mp) blockers.push(`take the required photos (${mp} missing – see the Photos tab)`);
         return blockers.length ? `<button class="btn block" disabled style="opacity:.5">Finish &amp; send to office</button><div class="warnline">Before finishing: ${blockers.join(" and ")}.</div>` : "";
       })() + `<button class="btn block" data-act="finish" ${!job.sig || (t !== "EICR" && jobSummary(job).status !== "pass") ? "hidden" : ""}>${job.sentAt || job.sendQueued ? "Send again to office" : "Finish &amp; send to office"}</button>
        <div class="row small"><span class="muted">To ${esc(settings.officeEmail)}${settings.sendUrl ? " and your Google Drive" : ""}. ${IOS ? (settings.sendUrl ? "Choose <b>Save to Files</b> to keep a copy on the phone." : "Choose <b>Mail</b> to send it to the office, or <b>Save to Files</b> to keep a copy.") : "A copy is also saved to Downloads."}</span>${sendStatus(job)}</div>
@@ -1272,7 +1471,8 @@ function tabReport(){
   const obs = job.obs.map((o,i) => `<div class="obs"><div class="row"><b style="font-family:var(--f-mono)">${i+1}</b><span class="spacer"></span>${view.confirmDel === "obs:" + o.id ? `<button class="btn danger sm" data-act="delObs" data-id="${o.id}">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button>` : job.example ? "" : `<button class="btn ghost sm" data-act="askDel" data-what="obs:${o.id}">Remove</button>`}</div>
     ${field("Observation", `job.obs.${i}.text`, {area:true})}
     <div class="grid2">${field("Location / circuit", `job.obs.${i}.loc`)}${field("Regulation", `job.obs.${i}.reg`)}</div>
-    ${chips("Code", `job.obs.${i}.code`, ["C1","C2","C3","FI"], {codes:true})}</div>`).join("");
+    ${chips("Code", `job.obs.${i}.code`, ["C1","C2","C3","FI"], {codes:true})}
+    <div class="field"><span>Photos</span>${thumbs(o.photos, "obs:" + o.id)}</div></div>`).join("");
   return `${banner}
   <div class="codes">${["C1","C2","C3","FI"].map(k => `<div><b>${s.counts[k]}</b><span>${k}</span></div>`).join("")}</div>
   ${warns.length ? `<div class="card"><h2>To sort out</h2>${warns.join("")}</div>` : ""}
@@ -1405,6 +1605,7 @@ document.addEventListener("click", e => {
     case "delBoard": job.boards.splice(Math.min(view.board, job.boards.length-1), 1); view.board = 0; view.confirmDel = null; markDirty(job); render(); break;
     case "delObs": job.obs = job.obs.filter(o => o.id !== a.dataset.id); view.confirmDel = null; markDirty(job); rerender(); break;
     case "delJob": { const i = jobs.findIndex(x => x.id === job.id);
+      allPhotoIds(job).forEach(id => { photoDel(id); photoCache.delete(id); });
       if (i >= 0) jobs[i] = normaliseJob({id: job.id, type: job.type, deleted: true, updated: Date.now(), client:{}, boards:[], obs:[], insp:{}, supply:{}});
       lsWrite(); scheduleSync(1000);
       view = {screen:"home", tab:"job", board:0, circ:null}; render(); break; }
@@ -1474,6 +1675,11 @@ section.wide{page:wide;break-before:page}
 .sig img{max-height:60px}
 .guide{font-size:9.5px}
 footer{margin-top:14px;font-size:9px;color:#555;text-align:center}
+.photos{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.photos figure{margin:0;border:1px solid #A6A6A6;padding:4px;break-inside:avoid;page-break-inside:avoid}
+.photos img{display:block;width:100%;max-height:95mm;object-fit:contain;background:#f4f4f4}
+.photos figcaption{font-size:9px;margin-top:3px}
+.photos .na div{height:60px;display:flex;align-items:center;justify-content:center;background:#f4f4f4;color:#555}
 `;
 function exportHtml(job){
   if (typeOf(job) !== "EICR") return exportCert(job);
@@ -1510,9 +1716,10 @@ ${sec("H. Declaration")}<p class="guide">I/We, being the person(s) responsible f
 <table class="kv"><tbody>${row2("Inspected and tested by", job.inspector, "Position", job.position)}<tr><th>Signature</th><td class="sig">${job.sig ? `<img src="${job.sig}" alt="Signature">` : ""}</td><th>Date</th><td>${esc(ukDate(job.sigDate))}</td></tr>${row("Reviewed / authorised by", job.reviewer)}</tbody></table>
 ${sec("I. Supply characteristics and earthing arrangements")}<table class="kv"><tbody>${row2("Earthing arrangement", job.supply.earth, "Live conductors", job.supply.phases)}${row2("Nominal voltage Uo (V)", job.supply.uo, "Frequency (Hz)", job.supply.freq)}${row2("Ze (Ω)", job.supply.ze, "Ipf (kA)", job.supply.ipf)}${row2("Supply polarity confirmed", job.supply.polarity, "Supply protective device", [job.supply.devBs, job.supply.devRating && job.supply.devRating + " A", job.supply.devKa && job.supply.devKa + " kA"].filter(Boolean).join(" · "))}</tbody></table>
 ${sec("J. Particulars of the installation at the origin")}<table class="kv"><tbody>${row2("Means of earthing", job.supply.means, "Electrode type / RA (Ω)", [job.supply.electrode, job.supply.ra].filter(Boolean).join(" / "))}${row2("Main switch BS (EN)", job.supply.msBs, "Poles / rating", job.supply.msRating)}${row2("Main switch RCD IΔn (mA)", job.supply.msRcd, "RCD time (ms)", job.supply.msRcdTime)}${row2("Earthing conductor (mm²)", job.supply.earthCsa + (sup.earthCheck ? ` – ${sup.earthCheck.t}` : ""), "Main bonding (mm²)", job.supply.bondCsa + (sup.bondCheck ? ` – ${sup.bondCheck.t}` : ""))}${row2("Connections verified", job.supply.bondVerified, "Bonding: water / gas / oil", [job.supply.water, job.supply.gas, job.supply.oil].map(x => x || "–").join(" / "))}${row2("Bonding: structural steel", job.supply.steel, "Bonding: lightning / other", [job.supply.lightning || "–", job.supply.otherBond].filter(Boolean).join(" / "))}</tbody></table>
-${sec("K. Observations and recommendations")}<table class="obs"><thead><tr><th>Item</th><th>Observation</th><th>Location</th><th>Regulation</th><th>Code</th></tr></thead><tbody>${job.obs.length ? job.obs.map((o,i) => `<tr><td>${i+1}</td><td>${esc(o.text)}</td><td>${esc(o.loc)}</td><td>${esc(o.reg)}</td><td class="code ${esc(o.code)}">${esc(o.code)}</td></tr>`).join("") : `<tr><td colspan="5">No observations.</td></tr>`}</tbody></table>
+${sec("K. Observations and recommendations")}<table class="obs"><thead><tr><th>Item</th><th>Observation</th><th>Location</th><th>Regulation</th><th>Code</th></tr></thead><tbody>${job.obs.length ? job.obs.map((o,i) => `<tr><td>${i+1}</td><td>${esc(o.text)}${(o.photos || []).length ? ` <i>(photo${o.photos.length === 1 ? "" : "s"} attached)</i>` : ""}</td><td>${esc(o.loc)}</td><td>${esc(o.reg)}</td><td class="code ${esc(o.code)}">${esc(o.code)}</td></tr>`).join("") : `<tr><td colspan="5">No observations.</td></tr>`}</tbody></table>
 <p class="guide">C1 Danger present – immediate action required. C2 Potentially dangerous – urgent remedial action required. C3 Improvement recommended. FI Further investigation required without delay.</p>
 <h2>Guidance for recipients</h2><p class="guide">This report assesses the condition of the electrical installation at the time of inspection, within the extent and limitations stated. Keep it safe and show it to anyone carrying out further work or the next inspection. If the overall assessment is UNSATISFACTORY, arrange for the C1, C2 and FI items to be put right by a competent person as soon as possible.</p>
+${photosSectionHtml(job, true)}
 <section style="break-before:page">${sec("Schedule of inspections")}<table class="insp"><thead><tr><th>Item</th><th>Description</th><th>Outcome</th></tr></thead><tbody>${INSP.map(([sid,t,items]) => `<tr class="grp"><td>${sid}</td><td colspan="2">${esc(t)}</td></tr>` + items.map(([id,q]) => `<tr><td>${id}</td><td>${esc(q)}</td><td>${esc(inspVal(id))}</td></tr>`).join("")).join("")}</tbody></table>
 <p class="guide">✓ Acceptable · C1/C2/C3/FI see observations · N/V Not verified · LIM Limitation · N/A Not applicable</p></section>
 ${boards}
@@ -1570,6 +1777,7 @@ ${sec("Part 4 – Declaration")}<p class="guide">I/We certify that the minor wor
 <div class="sub">${esc(TYPE_LONG[t])} – BS 7671:2018+A4:2026</div>
 <table class="kv"><tbody>${row2("Certificate number", job.reportNo, "Date of issue", ukDate(job.issueDate))}${row2("Contractor", co.company, "Registration / scheme no.", co.reg)}</tbody></table>
 ${body}
+${photosSectionHtml(job, false)}
 <footer>${esc(co.company || "BlueForge Engineering")} – ${esc(TYPES[t])} ${esc(job.reportNo || "")} – ${esc(job.address || "")}</footer>
 </body></html>`;
 }
@@ -1590,7 +1798,7 @@ function downloadFile(name, text, type, noShare){
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
 }
-function exportReport(){ const job = j(); downloadFile(fileName(job, "html"), exportHtml(job), "text/html"); const m = document.getElementById("exportmsg"); if (m) m.innerHTML = `<div class="muted small">${IOS ? "Choose Save to Files to keep a copy." : "Saved to Downloads."}</div>`; }
+async function exportReport(){ const job = j(); await loadJobPhotos(job); downloadFile(fileName(job, "html"), exportHtml(job), "text/html"); const m = document.getElementById("exportmsg"); if (m) m.innerHTML = `<div class="muted small">${IOS ? "Choose Save to Files to keep a copy." : "Saved to Downloads."}</div>`; }
 function printInPlace(job){
   // Swap the page for the report, with a toolbar that is hidden when printing. "Back" reloads the app (everything is already saved).
   try { if (persistTimer) { clearTimeout(persistTimer); writeNow(); } sessionStorage.setItem("bf-return", JSON.stringify({jobId: job.id, tab: view.tab})); } catch(e){}
@@ -1601,15 +1809,18 @@ function printInPlace(job){
   const html = exportHtml(job).replace(/<body>/, "<body>" + bar).replace('<meta name="viewport" content="width=device-width,initial-scale=1">', '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">');
   document.open(); document.write(html); document.close(); window.scrollTo(0, 0);
 }
-function printReport(){
+async function printReport(){
   const job = j();
-  if (IOS) { printInPlace(job); return; }
+  if (IOS) { await loadJobPhotos(job); printInPlace(job); return; }
   const w = window.open("", "_blank");
   if (!w) { exportReport(); return; }
+  try { w.document.write("<p style='font:16px Arial;padding:20px'>Preparing the report…</p>"); } catch(e){}
+  await loadJobPhotos(job);
   w.document.open(); w.document.write(exportHtml(job).replace("</body>", "<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script></body>")); w.document.close();
 }
-function backup(){
-  const data = JSON.stringify({app:"blueforge-eicr", version:2, saved:new Date().toISOString(), settings, jobs: jobs.filter(x => !x.example)});
+async function backup(){
+  const photos = await photosForBackup();
+  const data = JSON.stringify({app:"blueforge-eicr", version:2, saved:new Date().toISOString(), settings, jobs: jobs.filter(x => !x.example), photos});
   downloadFile(`BlueForge EICR backup ${today()}.json`, data, "application/json");
   const m = document.getElementById("backupmsg"); if (m) m.innerHTML = `<div class="muted small">${IOS ? "Choose Save to Files or Mail to keep the backup." : "Backup saved to Downloads."}</div>`;
 }
@@ -1623,6 +1834,7 @@ document.addEventListener("change", e => {
       if (!d || d.app !== "blueforge-eicr" || !Array.isArray(d.jobs)) throw new Error("not a backup");
       let added = 0;
       d.jobs.forEach(x => { if (!x || !x.id) return; normaliseJob(x); const i = jobs.findIndex(y => y.id === x.id); if (i < 0) { jobs.push(x); added++; } else if ((x.updated||0) > (jobs[i].updated||0)) { jobs[i] = x; added++; } });
+      if (d.photos && typeof d.photos === "object") Object.entries(d.photos).forEach(([id, r]) => { if (r && r.data) { photoPut({id, jobId: r.jobId, data: r.data, created: Date.now(), uploaded: false}); pendingUploads.add(id); } });
       if (d.settings && !settings.sendUrl && d.settings.sendUrl) { settings.sendUrl = d.settings.sendUrl; if (d.settings.sendKey) settings.sendKey = d.settings.sendKey; }
       lsWrite(); scheduleSync(1000);
       if (m) m.innerHTML = `<div class="muted small">Loaded ${added} job${added === 1 ? "" : "s"} (newer copies only).</div>`;
