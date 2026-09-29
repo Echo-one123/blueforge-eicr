@@ -516,7 +516,10 @@ async function api(action, data){
   const res = await fetch(settings.sendUrl, { method:"POST", body: JSON.stringify({ key: settings.sendKey, action, ...data }), redirect:"follow" });
   let o = null; try { o = await res.json(); } catch(e){}
   if (!o) throw new Error("no reply from your Google script – check the link");
-  if (!o.ok) throw new Error(o.error === "Unknown action" ? "your Google script is an old version – copy the new setup script" : (o.error || "script error"));
+  if (!o.ok) {
+    const old = o.error === "Unknown action" || /Argument cannot be null|Cannot read propert|newBlob/i.test(o.error || "");
+    throw new Error(old ? "your Google script is the old version – paste in the new setup script, then Deploy › Manage deployments › Edit (pencil) › Version: New version › Deploy" : (o.error || "script error"));
+  }
   return o;
 }
 function isEditing(){ const a = document.activeElement; return !!(a && a.matches && a.matches("input,textarea,select") && document.getElementById("app").contains(a)); }
@@ -1398,7 +1401,7 @@ document.addEventListener("click", e => {
     case "testSend": (async () => { const m = document.getElementById("sendmsg"); if (!settings.sendUrl) { if (m) m.innerHTML = `<div class="warnline">Paste the sync link first.</div>`; return; } if (m) m.innerHTML = `<div class="muted small">Sending…</div>`;
       try { await api("test", {to: settings.officeEmail}); syncNow();
         if (m) m.innerHTML = `<div class="muted small">Test email sent to ${esc(settings.officeEmail)}.</div>`; }
-      catch(err){ if (m) m.innerHTML = `<div class="errline">Couldn't send: ${esc(err.message || err)}. Check the link, and that the deployment's access is set to Anyone.</div>`; } })(); break;
+      catch(err){ const msg = String(err.message || err); if (m) m.innerHTML = `<div class="errline">Couldn't connect: ${esc(msg)}${/old version/.test(msg) ? "" : ". Check the link is the Web app URL ending in /exec, and that access is set to Anyone"}.</div>`; } })(); break;
     case "copyScript": { const t = scriptText(); const box = document.getElementById("scriptbox"); const m = document.getElementById("sendmsg");
       const shown = () => { box.hidden = false; box.value = t; box.focus(); box.select(); if (m) m.innerHTML = `<div class="muted small">Select all and copy the script below.</div>`; };
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(() => { if (m) m.innerHTML = `<div class="muted small">Script copied.</div>`; }, shown); else shown(); break; }
