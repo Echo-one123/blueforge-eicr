@@ -139,12 +139,27 @@ details.more>div{display:flex;flex-direction:column;gap:12px}
 .hero h2{font-family:var(--f-display);font-size:26px;margin:0;line-height:1.1;text-wrap:balance}
 .hero p{margin:0;opacity:.8;font-size:14px}
 .ex-tag{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--check);background:var(--check-bg);border-radius:6px;padding:2px 6px}
+.micfab{position:fixed;right:16px;bottom:calc(20px + env(safe-area-inset-bottom,0px));z-index:7;width:64px;height:64px;border-radius:50%;border:0;background:var(--blue);color:#fff;box-shadow:0 6px 18px rgba(0,0,0,.25);display:grid;place-items:center;cursor:pointer}
+.micfab svg{width:28px;height:28px}
+.micfab.on{background:var(--fail)}
+.shell.has-fab{padding-bottom:calc(110px + env(safe-area-inset-bottom,0px))}
+.voice{position:fixed;left:0;right:0;bottom:0;z-index:8;padding:0 12px calc(12px + env(safe-area-inset-bottom,0px))}
+.voice .in{max-width:640px;margin:0 auto;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:0 -4px 24px rgba(0,0,0,.18);padding:14px;display:flex;flex-direction:column;gap:10px}
+.voice .heard{font-size:15px;min-height:22px}
+.voice .heard i{color:var(--muted)}
+.voice .got{display:flex;flex-wrap:wrap;gap:6px}
+.voice .got span{background:var(--pass-bg);color:var(--pass);border-radius:8px;padding:4px 8px;font-size:13.5px;font-weight:600;font-family:var(--f-mono)}
+.pulse{width:12px;height:12px;border-radius:50%;background:var(--fail);display:inline-block}
+@media (prefers-reduced-motion:no-preference){.pulse{animation:pl 1s infinite ease-in-out}@keyframes pl{50%{opacity:.3;transform:scale(.7)}}}
+.dict{align-self:flex-start}
 @media (prefers-reduced-motion:no-preference){.card,.card-link{transition:border-color .15s}}
 </style>
 </head><body>
 
 <div class="shell" id="app"></div>
 <nav class="tabs" id="tabs" hidden></nav>
+<button class="micfab" id="micfab" hidden aria-label="Speak readings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+<div class="voice" id="voice" hidden></div>
 
 <script>
 (function(){
@@ -361,6 +376,189 @@ function jobSummary(job){
   return { counts, fails, unwrittenFails, coded, tested, total, unsat, started, years, interval, nextDue, status: !started ? "none" : unsat ? "fail" : "pass" };
 }
 
+/* ---- spoken readings parser (shared by app + tests) ---- */
+const VW = {zero:0,nought:0,naught:0,nort:0,oh:0,one:1,won:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19};
+const VT = {twenty:20,thirty:30,forty:40,fourty:40,fifty:50,sixty:60,seventy:70,eighty:80,ninety:90};
+function speechNormalise(raw){
+  let s = " " + String(raw).toLowerCase() + " ";
+  s = s.replace(/[,;!?]/g, " ").replace(/\+/g, " plus ").replace(/&/g, " and ").replace(/Ω/g, " ").replace(/-/g, " ");
+  s = s.replace(/\bmega? ?ohms?\b|\bmeg(?:s|ohms?)?\b|\bmΩ\b/g, " ").replace(/\bohms?\b/g, " ");
+  s = s.replace(/\bmilli ?seconds?\b|\bmils?\b|\bms\b/g, " ");
+  // number words -> digits
+  const t = s.split(/\s+/).filter(Boolean), out = [];
+  for (let i = 0; i < t.length; i++){
+    const w = t[i];
+    if (w in VT || w in VW){
+      let v = w in VT ? VT[w] : VW[w];
+      if (w in VT && t[i+1] in VW && VW[t[i+1]] > 0 && VW[t[i+1]] < 10) { v += VW[t[i+1]]; i++; }
+      if (t[i+1] === "hundred") { v *= 100; i++; if (t[i+1] === "and") i++; if (t[i+1] in VT) { v += VT[t[i+1]]; i++; if (t[i+1] in VW && VW[t[i+1]] < 10) { v += VW[t[i+1]]; i++; } } else if (t[i+1] in VW) { v += VW[t[i+1]]; i++; } }
+      out.push(String(v));
+    } else if (w === "hundred") out.push("100");
+    else out.push(w);
+  }
+  s = " " + out.join(" ") + " ";
+  s = s.replace(/\b9 9 9\b/g, "999");
+  // decimals: "0 point 3 6" / "point 3 6" / "0.36"
+  s = s.replace(/(\d+)?\s*(?:\bpoint\b|\.)\s*((?:\d\s?)+)/g, (m, a, b) => ` ${a || "0"}.${b.replace(/\s/g, "")} `);
+  // over-range
+  s = s.replace(/\b(?:greater|more|higher|bigger) than\s*(\d+(?:\.\d+)?)/g, " >$1").replace(/\b(?:over|above|in excess of)\s*(\d+(?:\.\d+)?)/g, " >$1");
+  s = s.replace(/\b(?:infinity|infinite|off (?:the )?scale|over ?range|o\.? ?l\.?)\b/g, " >999");
+  return s.replace(/\s+/g, " ");
+}
+const V = "(>\\s?\\d+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?|no trip|not trip|did(?:n't| not) trip|n\\/?a)";
+const SEP = "\\s*(?:is|was|of|at|=|:|reading|reads|equals|gives)?\\s*";
+const IRP = "(?:insulation(?: resistance)?|i ?r|megger|megging|meg)";
+const SPEECH_RULES = [
+  ["r12",  "(?:r ?1 ?(?:plus|and)? ?r ?2|(?:are|our|or) ?1 ?(?:plus|and) ?(?:are|our|or) ?2|r1r2|continuity)"],
+  ["irll", `${IRP}?\\s*(?:live ?(?:to )?live|l ?l|line ?(?:to )?(?:line|neutral)|live ?(?:to )?neutral)`],
+  ["irle", `${IRP}?\\s*(?:live ?(?:to )?earth|l ?e|line ?(?:to )?earth|to earth)`],
+  ["irboth", `${IRP}(?:\\s*both(?: ways)?)?`],
+  ["rcdt5", "(?:5 ?(?:times|x)|times 5|x ?5)(?: (?:i ?)?(?:delta|dn|δn)(?: n)?)?(?: (?:trip|time))?"],
+  ["rcdt", "(?:rcd(?: trip)?(?: time)?|trip(?: time)?|tripped(?: at| in)?|trips?(?: at| in))(?: (?:at )?(?:1 ?(?:times|x) )?(?:i ?)?(?:delta|dn|δn)(?: n)?)?"],
+  ["zs",   "(?:measured )?(?:zs|z s|zed s|zee s|zed|earth loop(?: impedance)?|loop(?: impedance)?)"],
+  ["r1",   "(?:ring )?(?:r ?1|(?:are|our) ?1|lines?(?: end to end)?)"],
+  ["rn",   "(?:ring )?(?:r ?n|are ?n|neutrals?(?: end to end)?)"],
+  ["r2",   "(?:ring )?(?:r ?2|(?:are|our) ?2|cpcs?(?: end to end)?|earths?(?: end to end)?)"],
+  ["len",  "(?:cable |circuit |run )?length"],
+];
+const TE_CPC = {"1":"1","1.5":"1","2.5":"1.5","4":"1.5","6":"2.5","10":"4","16":"6"};
+const OK_WORDS = "(?:ok|okay|good|correct|fine|tick|ticked|yes|pass|passed|confirmed|works|working|operates|operated|satisfactory)";
+const BAD_WORDS = "(?:wrong|incorrect|reversed|fail|failed|no|cross|not working|didn't work|did not work|faulty)";
+function parseSpeech(raw, ctx = {}){
+  let s = speechNormalise(raw);
+  const f = {}, cmd = [];
+  const take = (re, fn) => { s = s.replace(re, (...m) => { fn(...m); return " "; }); };
+  // commands and ticks
+  take(new RegExp(`\\bpolarity\\s*(?:is\\s*)?${OK_WORDS}\\b`, "g"), () => f.pol = "✓");
+  take(new RegExp(`\\bpolarity\\s*(?:is\\s*)?${BAD_WORDS}\\b`, "g"), () => f.pol = "✗");
+  take(new RegExp(`\\b(?:rcd )?test button\\s*(?:is\\s*)?${OK_WORDS}\\b`, "g"), () => f.rcdbtn = "✓");
+  take(new RegExp(`\\b(?:rcd )?test button\\s*(?:is\\s*)?${BAD_WORDS}\\b`, "g"), () => f.rcdbtn = "✗");
+  take(new RegExp(`\\b(?:afdd|arc fault)(?: test)?(?: button)?\\s*(?:is\\s*)?${OK_WORDS}\\b`, "g"), () => f.afdd = "✓");
+  take(/\b(?:at|test(?:ed)? at|test voltage)\s*(250|500|1000)\s*(?:volts?|v)\b/g, (m, v) => f.irv = v);
+  take(/\b(\d+(?:\.\d+)?)\s*(?:metres?|meters?|m)\b(?: long| run| cable)?/g, (m, v) => f.len = v);
+  const CS = "(1\\.5|2\\.5|10|16|1|4|6)", MM = "(?:\\s*(?:mm2?|mil|millimetres?|squared))*";
+  take(new RegExp(`\\b(?:cable|twin and earth|t and e|t ?& ?e)\\s*${CS}\\b${MM}\\s*(?:(?:and|by|slash|with|\\/)\\s*${CS}\\b${MM})?`, "g"), (m, a, b) => { f.live = a; f.cpc = b || TE_CPC[a]; });
+  take(new RegExp(`\\b${CS}${MM}\\s*(?:and|by|slash|with|\\/)\\s*${CS}\\b${MM}\\s*(?:cable|twin and earth|t and e)\\b`, "g"), (m, a, b) => { f.live = a; f.cpc = b; });
+  take(/\b(mcb|rcbo|breaker)?\s*(?:type\s*)?\b([bcd])\s?(3|6|10|16|20|25|32|40|50|63|80|100|125)\b(?:\s*(?:amps?|a)\b)?\s*(mcb|rcbo|breaker)?/g, (m, k1, t, r, k2) => {
+    const kind = (k1 || k2 || "").replace("breaker", "");
+    const fam = kind === "rcbo" ? "BS EN 61009 RCBO" : kind === "mcb" ? "BS EN 60898 MCB" : (ctx.dev && ctx.dev.includes("RCBO") ? "BS EN 61009 RCBO" : "BS EN 60898 MCB");
+    f.dev = `${fam} Type ${t.toUpperCase()}`; f.rating = r;
+  });
+  take(/\bring(?: final)?\b(?!\s*(?:r|are|our|lines?|neutrals?|earths?|cpc)\b)/g, () => f.ring = "Y");
+  take(/\bradial\b/g, () => f.ring = "N");
+  take(/\bnext circuit\b|\bnext\b\s*$/g, () => cmd.push("next"));
+  for (const [key, pat] of SPEECH_RULES){
+    const re = new RegExp(`\\b${pat}\\b${key === "len" ? SEP + "(\\d+(?:\\.\\d+)?)" : SEP + V}`, "g");
+    take(re, (m, v) => {
+      if (/trip/.test(v)) v = "No trip";
+      else if (/^n\/?a$/.test(v)) v = "N/A";
+      else v = v.replace(/\s/g, "");
+      if (key === "irboth") { f.irll = f.irll || v; f.irle = f.irle || v; }
+      else if (key === "r2" && ctx.ring !== "Y" && f.ring !== "Y") f.R2 = v;
+      else f[key] = v;
+    });
+  }
+  return { fields: f, commands: cmd, leftover: s.trim() };
+}
+
+
+/* ------------------------------------------------------------------ voice */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+const voice = { state:"idle", mode:"", bind:"", text:"", got:[], note:"", err:"", undo:null };
+const VLABEL = {r12:"R1+R2",irll:"IR L–L",irle:"IR L–E",zs:"Zs",rcdt:"RCD",rcdt5:"RCD 5×",r1:"r1",rn:"rn",r2:"r2",R2:"R2",len:"Length",live:"Live",cpc:"cpc",dev:"Device",rating:"Rating",ring:"Ring",pol:"Polarity",rcdbtn:"RCD button",afdd:"AFDD",irv:"IR test V"};
+function renderVoice(){
+  const box = document.getElementById("voice"), fab = document.getElementById("micfab");
+  const onCirc = view.screen === "job" && view.tab === "circuits" && curCirc() && !curJob().example;
+  fab.hidden = !(SR && onCirc) || voice.state !== "idle";
+  document.getElementById("app").classList.toggle("has-fab", !!(SR && onCirc));
+  if (voice.state === "idle") { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  let body = "";
+  if (voice.state === "listening") body = `<div class="row"><span class="pulse"></span><b>Listening…</b><span class="spacer"></span><button class="btn ghost sm" data-voice="stop">Stop</button></div>
+    <div class="heard">${voice.text ? esc(voice.text) : `<i>${voice.mode === "readings" ? "Say e.g. “R1 plus R2 0.36, insulation greater than 999, Zs 0.66, RCD 22”" : "Speak now…"}</i>`}</div>`;
+  else if (voice.state === "done") body = `<div class="heard"><span class="muted small">Heard</span><br>“${esc(voice.text)}”</div>
+    ${voice.mode === "readings" ? (voice.got.length ? `<div class="got">${voice.got.map(g => `<span>${esc(g)}</span>`).join("")}</div>` : `<div class="warnline">Couldn't pick out any readings. Try saying the name then the value, e.g. “Zs 0.66”.</div>`) : ""}
+    ${voice.note ? `<div class="muted small">${esc(voice.note)}</div>` : ""}
+    <div class="row">${voice.undo ? `<button class="btn ghost sm" data-voice="undo">Undo</button>` : ""}<span class="spacer"></span><button class="btn ghost sm" data-voice="close">Close</button><button class="btn sm" data-voice="again">🎤 Again</button></div>`;
+  else if (voice.state === "error") body = `<div class="errline">${esc(voice.err)}</div><div class="row"><span class="spacer"></span><button class="btn ghost sm" data-voice="close">Close</button></div>`;
+  box.innerHTML = `<div class="in" role="status" aria-live="polite">${body}</div>`;
+}
+function startVoice(mode, bind){
+  if (!SR) return;
+  try { if (rec) rec.abort(); } catch(e){}
+  Object.assign(voice, {state:"listening", mode, bind:bind || "", text:"", got:[], note:"", err:"", undo: mode === "readings" ? null : voice.undo});
+  renderVoice();
+  rec = new SR();
+  rec.lang = "en-GB"; rec.interimResults = true; rec.maxAlternatives = 3; rec.continuous = false;
+  let finalAlts = null;
+  rec.onresult = e => {
+    let txt = "";
+    for (let i = 0; i < e.results.length; i++) txt += e.results[i][0].transcript + " ";
+    voice.text = txt.trim();
+    const last = e.results[e.results.length - 1];
+    if (last.isFinal) finalAlts = Array.from(last).map(a => a.transcript);
+    renderVoice();
+  };
+  rec.onerror = e => {
+    const m = { "not-allowed":"Microphone blocked. Allow the microphone for this app in your phone's settings.", "service-not-allowed":"Voice input isn't available here. Use the microphone on your keyboard instead.",
+      "network":"Voice input needs signal on this phone. Use the microphone on your keyboard instead – it works offline.", "no-speech":"Didn't hear anything. Tap the mic and try again.", "audio-capture":"No microphone found." }[e.error];
+    if (e.error === "aborted") return;
+    voice.state = "error"; voice.err = m || "Voice input stopped (" + e.error + ")."; renderVoice();
+  };
+  rec.onend = () => {
+    if (voice.state !== "listening") return;
+    if (!voice.text) { voice.state = "error"; voice.err = "Didn't hear anything. Tap the mic and try again."; renderVoice(); return; }
+    finishVoice(finalAlts && finalAlts.length ? finalAlts : [voice.text]);
+  };
+  try { rec.start(); } catch(e){ voice.state = "error"; voice.err = "Couldn't start the microphone."; renderVoice(); }
+}
+function finishVoice(alts){
+  voice.state = "done";
+  if (voice.mode === "dictate") {
+    const [root, ...rest] = voice.bind.split(".");
+    const obj = roots()[root]; const path = rest.join(".");
+    if (obj) {
+      let t = alts[0].trim(); t = t.charAt(0).toUpperCase() + t.slice(1); if (!/[.!?]$/.test(t)) t += ".";
+      const cur = getPath(obj, path) || "";
+      voice.undo = {kind:"dictate", obj, path, prev: cur};
+      setPath(obj, path, (cur ? cur.replace(/\s*$/, "") + " " : "") + t);
+      markDirty(j()); rerender();
+    }
+    renderVoice(); return;
+  }
+  const c = curCirc(); if (!c) { renderVoice(); return; }
+  // pick the alternative that recognises the most readings
+  let best = null;
+  alts.forEach(a => { const r = parseSpeech(a, {ring:c.ring, dev:c.dev}); if (!best || Object.keys(r.fields).length > Object.keys(best.fields).length) { best = r; voice.text = a; } });
+  const f = best.fields;
+  if ((f.r1 || f.rn) && c.ring !== "Y") f.ring = "Y";
+  if ((f.rcdt || f.rcdt5) && !c.rcd) { f.rcd = "30"; voice.note = "RCD set to 30 mA because a trip time was given – change it if that's wrong."; }
+  const prev = {}; Object.keys(f).forEach(k => prev[k] = c[k]);
+  voice.undo = Object.keys(f).length ? {kind:"readings", circ:c, prev} : null;
+  Object.assign(c, f);
+  voice.got = Object.keys(f).filter(k => k !== "rcd").map(k => `${VLABEL[k] || k} ${k === "dev" ? devShort(c) : f[k]}`);
+  if (Object.keys(f).length) markDirty(j());
+  rerender();
+  if (best.commands.includes("next")) { voice.state = "idle"; const n = document.querySelector('[data-act="next"]'); if (n) n.click(); return; }
+  renderVoice();
+}
+document.addEventListener("click", e => {
+  const d = e.target.closest("[data-dictate]");
+  if (d) { e.preventDefault(); startVoice("dictate", d.dataset.dictate); return; }
+  if (e.target.closest("#micfab")) { startVoice("readings"); return; }
+  const v = e.target.closest("[data-voice]"); if (!v) return;
+  const a = v.dataset.voice;
+  if (a === "stop") { try { rec && rec.stop(); } catch(err){} }
+  if (a === "close") { voice.state = "idle"; renderVoice(); }
+  if (a === "again") startVoice(voice.mode || "readings", voice.bind);
+  if (a === "undo" && voice.undo) {
+    const u = voice.undo;
+    if (u.kind === "readings") Object.assign(u.circ, u.prev); else setPath(u.obj, u.path, u.prev);
+    voice.undo = null; voice.got = []; voice.note = "Undone."; markDirty(j()); rerender(); renderVoice();
+  }
+});
+
 /* ------------------------------------------------------------------ storage */
 let db = null, userId = null, dl = null, mode = "connecting";
 let jobs = [];                    // array of job objects
@@ -529,7 +727,7 @@ function field(label, bind, opts={}){
   const type = opts.type === "date" ? "date" : opts.type === "email" ? "email" : "text";
   const id = "f-" + bind.replace(/\./g,"-");
   let input;
-  if (opts.area) input = `<textarea id="${id}" data-bind="${bind}"${ph}>${esc(v)}</textarea>`;
+  if (opts.area) input = `<textarea id="${id}" data-bind="${bind}"${ph}>${esc(v)}</textarea>` + (SR && !bind.startsWith("settings") ? `<button type="button" class="btn ghost sm dict" data-dictate="${bind}">🎤 Dictate</button>` : "");
   else input = `<input id="${id}" type="${type}" class="${cls}" data-bind="${bind}" value="${esc(v)}"${ph}${im}>`;
   if (opts.unit) input = `<div class="unit">${input}<em>${esc(opts.unit)}</em></div>`;
   return `<label class="field" for="${id}"><span>${esc(label)}</span>${input}${opts.hint ? `<span class="hint">${opts.hint}</span>` : ""}${opts.extra || ""}</label>`;
@@ -604,6 +802,7 @@ function render(){
   app.innerHTML = html;
   renderTabs();
   initSig();
+  if (typeof renderVoice === "function") { if (!(view.screen === "job" && view.tab === "circuits" && curCirc()) && voice.mode === "readings" && voice.state !== "listening") voice.state = "idle"; renderVoice(); }
   if (view.keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
   view.keepScroll = false;
 }
@@ -802,7 +1001,7 @@ function renderCircuit(){
       ${c.rcd ? chips("RCD type","circ.rcdType",RCD_TYPES,{small:true}) : ""}
     </div>
     <div class="card"><h2>Design figures</h2><div class="figs" data-derived="design">${DERIVED.design()}</div><div data-derived="designnote">${DERIVED.designnote()}</div></div>
-    <div class="card"><h2>Test results</h2>
+    <div class="card"><h2>Test results</h2>${SR && !job.example ? `<div class="muted small">Tap the blue 🎤 and read out your results – e.g. “R1 plus R2 0.36, insulation greater than 999, Zs 0.66, RCD 22”. Say “next circuit” to move on.</div>` : ""}
       ${ring ? `<div class="grid2">${field("r1 (end to end)","circ.r1",{num:true,unit:"Ω"})}${field("rn (end to end)","circ.rn",{num:true,unit:"Ω"})}</div>${field("r2 (end to end)","circ.r2",{num:true,unit:"Ω"})}` : ""}
       <div class="grid2">${field("R1+R2","circ.r12",{num:true,unit:"Ω"})}${field("R2 (optional)","circ.R2",{num:true,unit:"Ω"})}</div>
       ${chips("IR test voltage (V)","circ.irv",["250","500","1000"],{small:true})}
