@@ -514,8 +514,16 @@ function setSync(state, err){ syncState.state = state; syncState.err = err || ""
 function scheduleSync(ms){ if (!settings.sendUrl) return; clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, ms); }
 async function api(action, data){
   const res = await fetch(settings.sendUrl, { method:"POST", body: JSON.stringify({ key: settings.sendKey, action, ...data }), redirect:"follow" });
-  let o = null; try { o = await res.json(); } catch(e){}
-  if (!o) throw new Error("no reply from your Google script – check the link");
+  const text = await res.text().catch(() => "");
+  let o = null; try { o = JSON.parse(text); } catch(e){}
+  if (!o) {
+    const t = text.toLowerCase();
+    if (/authori[sz]ation is required|needs your permission|permission/.test(t)) throw new Error("Google needs permission – in the script editor run “authorise”, allow Drive and Gmail, then Deploy › Manage deployments › Edit › New version");
+    if (/script function not found|dopost/.test(t)) throw new Error("the deployed script has no doPost – paste the new script, Save, then deploy a New version");
+    if (/accounts\.google\.com|sign in|servicelogin/.test(t)) throw new Error("Google asked for a sign-in – set the deployment's access to “Anyone” (not “Anyone with a Google account”)");
+    if (res.status === 404 || /unable to open the file|not found/.test(t)) throw new Error("that link doesn't point to a live script – use the Web app URL ending in /exec");
+    throw new Error("no reply from your Google script (" + res.status + ") – check the link ends in /exec and a New version is deployed");
+  }
   if (!o.ok) {
     const old = o.error === "Unknown action" || /Argument cannot be null|Cannot read propert|newBlob/i.test(o.error || "");
     throw new Error(old ? "your Google script is the old version – paste in the new setup script, then Deploy › Manage deployments › Edit (pencil) › Version: New version › Deploy" : (o.error || "script error"));
@@ -626,11 +634,17 @@ function sendStatus(job){
   if (job.sentAt) return pill("pass","Sent to office");
   return "";
 }
-function connectionCode(){ try { return "BFEICR:" + btoa(unescape(encodeURIComponent(JSON.stringify({u: settings.sendUrl, k: settings.sendKey, o: settings.officeEmail})))); } catch(e){ return ""; } }
+function connectionCode(){ try { return "BFEICR:" + btoa(unescape(encodeURIComponent(JSON.stringify({u: settings.sendUrl, k: settings.sendKey, o: settings.officeEmail})))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); } catch(e){ return ""; } }
 function applyConnectionCode(code){
-  const m = String(code || "").trim().match(/^BFEICR:(.+)$/);
-  if (!m) throw new Error("That isn't a BlueForge connection code.");
-  const d = JSON.parse(decodeURIComponent(escape(atob(m[1]))));
+  // Email and chat apps often wrap long lines, add spaces or smart characters – strip anything that can't be part of the code.
+  const raw = String(code || "").replace(/[\s\u200B-\u200D\uFEFF"'`<>]/g, "");
+  const m = raw.match(/BFEICR:([A-Za-z0-9+\/_=-]+)/i);
+  if (!m) throw new Error("Couldn't find a code starting with BFEICR: – paste the whole thing.");
+  let b64 = m[1].replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4) b64 += "=";
+  let d;
+  try { d = JSON.parse(decodeURIComponent(escape(atob(b64)))); }
+  catch(e){ throw new Error("The code looks cut short or changed – copy it again, or use the key box below instead."); }
   if (!d.u || !d.k) throw new Error("The code is incomplete.");
   settings.sendUrl = d.u; settings.sendKey = d.k; if (d.o) settings.officeEmail = d.o;
   settings.lastSync = 0; lsWrite();
@@ -898,6 +912,10 @@ function renderSettings(){
         <button class="btn ghost sm" data-act="copyCode">Copy code</button>` : `<div class="muted small">Set up sync first – then a code appears here to link other devices.</div>`}
       <label class="field" for="joincode"><span>Connect this device</span><textarea id="joincode" placeholder="Paste a BFEICR: code here" style="min-height:60px"></textarea></label>
       <button class="btn sm" data-act="join">Connect</button><div id="joinmsg"></div>
+      <details class="more"><summary>Or enter the link and key by hand</summary><div>
+        <div class="muted small">Every connected device must have the same <b>Sync link</b> (in Sync &amp; office above) and the same <b>key</b>. Copy both from the device you set the script up on.</div>
+        ${field("Sync key","settings.sendKey",{hint:"Starts with bf- … Must match the KEY line at the top of your Google script."})}
+      </div></details>
     </div>
     <div class="card"><h2>Contractor</h2>
       ${field("Company","settings.company")}${field("Inspector (signs certificates)","settings.inspector")}${field("Position","settings.position")}
