@@ -394,6 +394,7 @@ async function init(){
   if (local.settings) settings = {...DEFAULT_SETTINGS, ...local.settings};
   jobs = Array.isArray(local.jobs) ? local.jobs : [];
   mode = "local"; saveState = "saved";
+  try { const r = JSON.parse(sessionStorage.getItem("bf-return") || "null"); sessionStorage.removeItem("bf-return"); if (r && jobs.some(x => x.id === r.jobId)) view = {screen:"job", jobId:r.jobId, tab:r.tab, board:0, circ:null}; } catch(e){}
   if (!settings.sendKey) { settings.sendKey = "bf-" + Math.random().toString(36).slice(2,10) + Math.random().toString(36).slice(2,10); lsWrite(); }
   window.addEventListener("online", processQueue);
   setTimeout(processQueue, 1500);
@@ -451,10 +452,18 @@ async function shareToEmail(job){
 }
 async function finishAndSend(){
   const job = j(); if (job.example) return;
-  // 1. keep a copy on the phone
-  downloadFile(fileName(job, "html"), exportHtml(job), "text/html");
-  setTimeout(() => downloadFile(fileName(job, "json"), jobBackup(job), "application/json"), 600);
+  const copies = [{name: fileName(job, "html"), text: exportHtml(job), type: "text/html"}, {name: fileName(job, "json"), text: jobBackup(job), type: "application/json"}];
   job.finishedAt = Date.now();
+  if (IOS) {
+    // One share sheet: Save to Files keeps the copy; if sending isn't set up, Mail sends it to the office.
+    if (settings.sendUrl && settings.autoSend !== "No") { job.sendQueued = true; job.sendError = ""; }
+    markDirty(job); rerender(); processQueue();
+    await shareFiles(copies, reportSubject(job));
+    return;
+  }
+  // 1. keep a copy on the phone
+  downloadFile(copies[0].name, copies[0].text, copies[0].type);
+  setTimeout(() => downloadFile(copies[1].name, copies[1].text, copies[1].type), 600);
   // 2. send
   if (settings.sendUrl && settings.autoSend !== "No") { job.sendQueued = true; job.sendError = ""; markDirty(job); rerender(); processQueue(); }
   else { markDirty(job); await shareToEmail(job); rerender(); }
@@ -658,7 +667,7 @@ function renderSettings(){
       <textarea id="scriptbox" readonly hidden style="width:100%;min-height:160px;font-family:var(--f-mono);font-size:11px"></textarea>
     </div>
     <div class="card"><h2>Backup</h2>
-      <div class="muted small">Your reports are stored on this phone only. Save a backup file now and then (and before changing phones) – keep it in Google Drive or email it to yourself.</div>
+      <div class="muted small">${IOS ? "On iPhone, always open the app from its home screen icon – reports saved there are kept separately from Safari. " : ""}Your reports are stored on this phone only. Save a backup file now and then (and before changing phones) – keep it in Google Drive or email it to yourself.</div>
       <button class="btn block" data-act="backup">Save backup file</button>
       <label class="btn block ghost" for="restore">Restore from backup</label>
       <input type="file" id="restore" accept=".json,application/json" hidden>
@@ -851,10 +860,10 @@ function tabReport(){
     ${field("Reviewed / authorised by","job.reviewer")}</div>
   <div class="card"><h2>Finished report</h2>
     ${job.example ? "" : `<button class="btn block" data-act="finish">${job.sentAt || job.sendQueued ? "Send again to office" : "Finish &amp; send to office"}</button>
-    <div class="row small"><span class="muted">To ${esc(settings.officeEmail)}. A copy of the report and its data file is saved in Downloads.</span>${sendStatus(job)}</div>
+    <div class="row small"><span class="muted">To ${esc(settings.officeEmail)}. ${IOS ? (settings.sendUrl ? "Choose <b>Save to Files</b> to keep a copy on the phone." : "Choose <b>Mail</b> to send to the office, or <b>Save to Files</b> to keep a copy.") : "A copy of the report and its data file is saved in Downloads."}</span>${sendStatus(job)}</div>
     ${job.sendError && job.sendQueued ? `<div class="warnline">Not sent yet: ${esc(job.sendError)}. It will keep trying.</div>` : ""}`}
     <button class="btn block ghost" data-act="print">Print / save as PDF</button>
-    <div class="muted small">Opens the full EICR laid out for A4. In the print screen choose <b>Save as PDF</b> to send it to the client.</div>
+    <div class="muted small">${IOS ? "Shows the full EICR. Tap <b>Print / PDF</b>, then Share › <b>Save to Files</b> for a PDF. <b>Back to app</b> returns here." : "Opens the full EICR laid out for A4. In the print screen choose <b>Save as PDF</b> to send it to the client."}</div>
     <button class="btn block ghost" data-act="export">Download report file</button><div id="exportmsg"></div>
   </div>
   ${job.example ? "" : `<div class="card"><h2>Delete report</h2>${view.confirmDel === "job" ? `<div class="row"><span class="small">Delete this whole report? This can't be undone.</span><button class="btn danger sm" data-act="delJob">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="job">Delete this report</button>`}</div>`}`;
@@ -1048,14 +1057,36 @@ ${boards}
 </body></html>`;
 }
 function fileName(job, ext){ return `EICR ${(job.address || job.client.name || "report").split(/[\n,]/)[0].trim().slice(0,60)} ${ukDate(job.inspDate).replace(/\//g,"-")}.${ext}`.replace(/[\\/:*?"<>|]/g,""); }
-function downloadFile(name, text, type){
+const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+// iPhone: save files through the share sheet (Save to Files / Mail). Must be called straight from a tap.
+async function shareFiles(list, title){
+  const files = list.map(f => new File([f.text], f.name, {type: f.type}));
+  const tryShare = async fs => { if (navigator.canShare && navigator.canShare({files: fs})) { await navigator.share({files: fs, title}); return true; } return false; };
+  try { if (await tryShare(files)) return "shared"; if (files.length > 1 && await tryShare([files[0]])) return "shared"; }
+  catch(e){ if (e && e.name === "AbortError") return "cancelled"; }
+  list.forEach((f, i) => setTimeout(() => downloadFile(f.name, f.text, f.type, true), i*600));
+  return "downloaded";
+}
+function downloadFile(name, text, type, noShare){
+  if (IOS && !noShare) { shareFiles([{name, text, type}], name); return; }
   const blob = new Blob([text], {type});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
 }
-function exportReport(){ const job = j(); downloadFile(fileName(job, "html"), exportHtml(job), "text/html"); const m = document.getElementById("exportmsg"); if (m) m.innerHTML = `<div class="muted small">Saved to Downloads.</div>`; }
+function exportReport(){ const job = j(); downloadFile(fileName(job, "html"), exportHtml(job), "text/html"); const m = document.getElementById("exportmsg"); if (m) m.innerHTML = `<div class="muted small">${IOS ? "Choose Save to Files to keep a copy." : "Saved to Downloads."}</div>`; }
+function printInPlace(job){
+  // Swap the page for the report, with a toolbar that is hidden when printing. "Back" reloads the app (everything is already saved).
+  try { sessionStorage.setItem("bf-return", JSON.stringify({jobId: job.id, tab: "report"})); } catch(e){}
+  const bar = `<div id="bf-bar" style="position:sticky;top:0;z-index:9;display:flex;gap:8px;padding:10px 12px;padding-top:calc(10px + env(safe-area-inset-top,0px));background:#1B365D">
+<button onclick="location.reload()" style="flex:1;min-height:44px;border-radius:10px;border:1px solid #fff;background:transparent;color:#fff;font:600 16px Arial">‹ Back to app</button>
+<button onclick="window.print()" style="flex:1;min-height:44px;border-radius:10px;border:0;background:#2E75B6;color:#fff;font:600 16px Arial">Print / PDF</button></div>
+<style>@media print{#bf-bar{display:none!important}}</style>`;
+  const html = exportHtml(job).replace(/<body>/, "<body>" + bar).replace('<meta name="viewport" content="width=device-width,initial-scale=1">', '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">');
+  document.open(); document.write(html); document.close(); window.scrollTo(0, 0);
+}
 function printReport(){
   const job = j();
+  if (IOS) { printInPlace(job); return; }
   const w = window.open("", "_blank");
   if (!w) { exportReport(); return; }
   w.document.open(); w.document.write(exportHtml(job).replace("</body>", "<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script></body>")); w.document.close();
@@ -1063,7 +1094,7 @@ function printReport(){
 function backup(){
   const data = JSON.stringify({app:"blueforge-eicr", version:1, saved:new Date().toISOString(), settings, jobs: jobs.filter(x => !x.example)});
   downloadFile(`BlueForge EICR backup ${today()}.json`, data, "application/json");
-  const m = document.getElementById("backupmsg"); if (m) m.innerHTML = `<div class="muted small">Backup saved to Downloads.</div>`;
+  const m = document.getElementById("backupmsg"); if (m) m.innerHTML = `<div class="muted small">${IOS ? "Choose Save to Files or Mail to keep the backup." : "Backup saved to Downloads."}</div>`;
 }
 document.addEventListener("change", e => {
   if (e.target.id !== "restore" || !e.target.files[0]) return;
