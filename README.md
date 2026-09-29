@@ -1,4 +1,4 @@
-# BlueForge EICR
+# BlueForge Certificates
 
-Offline phone app for Electrical Installation Condition Reports (BlueForge Engineering).
-Reports are stored on the phone only; nothing in this repository holds client data.
+Offline phone/PC app for EICRs, EICs and Minor Works certificates (BlueForge Engineering).
+Data is kept on each device and synced to the owner's own Google Drive through their Google Apps Script. No client data is stored in this repository.

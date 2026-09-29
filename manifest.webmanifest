@@ -1,7 +1,7 @@
 {
- "name": "BlueForge EICR",
- "short_name": "BF EICR",
- "description": "Electrical Installation Condition Reports for BlueForge Engineering",
+ "name": "BlueForge Certificates",
+ "short_name": "BlueForge",
+ "description": "EICRs, EICs and Minor Works certificates for BlueForge Engineering",
  "start_url": "./",
  "scope": "./",
  "display": "standalone",

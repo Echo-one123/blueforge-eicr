@@ -1,14 +1,29 @@
-const CACHE = "bf-eicr-v4";
-const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
-self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
-self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
+// BlueForge Certificates – offline cache. Bump CACHE on every release so devices pick up the new version.
+const CACHE = "bf-eicr-v5";
+const SHELL = ["./", "./index.html", "./app.js", "./bf-data.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
+self.addEventListener("install", e => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, {cache: "reload"})))).then(() => self.skipWaiting()));
+});
+self.addEventListener("activate", e => {
+  e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
+});
 self.addEventListener("fetch", e => {
-  if (e.request.method !== "GET") return;
-  e.respondWith(caches.match(e.request, {ignoreSearch:true}).then(hit => {
-    const net = fetch(e.request).then(res => {
-      if (res && (res.ok || res.type === "opaque")) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); }
+  const req = e.request;
+  if (req.method !== "GET") return;
+  const url = new URL(req.url);
+  // Only handle our own files and Google Fonts; everything else (e.g. the sync script) goes straight to the network.
+  const own = url.origin === self.location.origin;
+  const font = /fonts\.(googleapis|gstatic)\.com$/.test(url.hostname);
+  if (!own && !font) return;
+  e.respondWith(caches.open(CACHE).then(async cache => {
+    const hit = await cache.match(req, {ignoreSearch: true}) || (req.mode === "navigate" ? await cache.match("./index.html") : undefined);
+    if (hit) return hit;
+    try {
+      const res = await fetch(req);
+      if (res && (res.ok || res.type === "opaque") && font) cache.put(req, res.clone());
       return res;
-    }).catch(() => hit || (e.request.mode === "navigate" ? caches.match("./index.html") : undefined));
-    return hit || net;
+    } catch (err) {
+      return hit || Response.error();
+    }
   }));
 });
