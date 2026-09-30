@@ -525,12 +525,14 @@ async function init(){
       navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController) { appUpdated = true; updateStatus(); } });
     } catch(e){}
   }
-  try { const r = JSON.parse(sessionStorage.getItem("bf-return") || "null"); sessionStorage.removeItem("bf-return"); if (r && jobs.some(x => x.id === r.jobId && !x.deleted)) view = {screen:"job", jobId:r.jobId, tab:r.tab, board:0, circ:null}; } catch(e){}
+  const lost = takePhotoPending();
+  if (lost && jobs.some(x => x.id === lost.jobId && !x.deleted)) { view = {screen:"job", jobId:lost.jobId, tab:"photos", board:0, circ:null, photoLost: lost.target}; }
+  else try { const r = JSON.parse(sessionStorage.getItem("bf-return") || "null"); sessionStorage.removeItem("bf-return"); if (r && jobs.some(x => x.id === r.jobId && !x.deleted)) view = {screen:"job", jobId:r.jobId, tab:r.tab, board:0, circ:null}; } catch(e){}
   render(); hideSplash();
   if (lockOn()) showLock();
   window.addEventListener("online", () => { updateStatus(); syncNow(); });
   window.addEventListener("offline", updateStatus);
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") syncNow(); else if (persistTimer) { clearTimeout(persistTimer); writeNow(); } });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { setTimeout(clearPhotoPending, 5000); syncNow(); } else if (persistTimer) { clearTimeout(persistTimer); writeNow(); } });
   window.addEventListener("pagehide", () => { if (persistTimer) { clearTimeout(persistTimer); writeNow(); } });
   setInterval(() => { syncNow(); updateStatus(); }, 60000);
   setTimeout(syncNow, 800);
@@ -640,23 +642,36 @@ async function loadJobPhotos(job){
   for (const id of want){ const r = await photoGet(id); if (r && r.data) { photoCache.set(id, r.data); got = true; } }
   if (got && view.screen === "job" && view.jobId === job.id && !isEditing()) rerender();
 }
-function compressImage(file){
-  return new Promise((resolve, reject) => {
+// Shrink a camera photo to 1600 px without ever holding the full 12–50 MP image in memory where the browser allows it
+// (decoding a full-size photo into a canvas is what makes low-memory phones kill the app).
+const PHOTO_MAX = 1600;
+async function compressImage(file){
+  const toData = (src, sw, sh) => { const sc = Math.min(1, PHOTO_MAX / Math.max(sw, sh)); const w = Math.max(1, Math.round(sw * sc)), h = Math.max(1, Math.round(sh * sc));
+    let cv = document.createElement("canvas"); cv.width = w; cv.height = h; const ctx = cv.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h); ctx.drawImage(src, 0, 0, w, h);
+    const data = cv.toDataURL("image/jpeg", 0.72); cv.width = cv.height = 0; cv = null; return { data, w, h }; };
+  if (window.createImageBitmap) {
+    try {
+      // First pass decodes straight to at most 1600 px wide; a tall photo may come back taller, the canvas step caps it.
+      const bm = await createImageBitmap(file, { resizeWidth: PHOTO_MAX, resizeQuality: "high", imageOrientation: "from-image" });
+      let out;
+      if (bm.width > PHOTO_MAX * 1.02 || bm.height > PHOTO_MAX * 1.6) {  // resize option ignored (older Safari) – fall through to the image path below
+        bm.close && bm.close();
+      } else { out = toData(bm, bm.width, bm.height); bm.close && bm.close(); return out; }
+    } catch(e){ /* fall back */ }
+  }
+  return await new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file), img = new Image();
-    img.onload = () => {
-      try {
-        const max = 1600, sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
-        const w = Math.max(1, Math.round(img.naturalWidth * sc)), h = Math.max(1, Math.round(img.naturalHeight * sc));
-        const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
-        const ctx = cv.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
-        URL.revokeObjectURL(url);
-        resolve({ data: cv.toDataURL("image/jpeg", 0.72), w, h });
-      } catch(e){ URL.revokeObjectURL(url); reject(e); }
-    };
+    img.decoding = "async";
+    img.onload = () => { try { const r = toData(img, img.naturalWidth, img.naturalHeight); URL.revokeObjectURL(url); img.src = ""; resolve(r); } catch(e){ URL.revokeObjectURL(url); reject(new Error("The phone ran short of memory shrinking that photo – try again, or use Gallery.")); } };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("That file isn't a photo this device can read.")); };
     img.src = url;
   });
 }
+// If the phone closes the app while its camera is open, remember where we were so the app reopens on the same photo slot.
+const PHOTO_MARK = "bf-photo-pending";
+function markPhotoPending(target){ try { if (persistTimer) { clearTimeout(persistTimer); writeNow(); } sessionStorage.setItem(PHOTO_MARK, JSON.stringify({ jobId: view.jobId, tab: view.tab, target, at: Date.now() })); localStorage.setItem(PHOTO_MARK, sessionStorage.getItem(PHOTO_MARK)); } catch(e){} }
+function clearPhotoPending(){ try { sessionStorage.removeItem(PHOTO_MARK); localStorage.removeItem(PHOTO_MARK); } catch(e){} }
+function takePhotoPending(){ try { const r = JSON.parse(sessionStorage.getItem(PHOTO_MARK) || localStorage.getItem(PHOTO_MARK) || "null"); clearPhotoPending(); return r && Date.now() - r.at < 20 * 60000 ? r : null; } catch(e){ return null; } }
 async function addPhotos(target, files){
   const job = j(); if (!job || job.example || !files || !files.length) return;
   const p = ensurePhotos(job);
@@ -691,7 +706,9 @@ function toast(msg){ let t = document.getElementById("toast"); if (!t) { t = doc
 function thumbs(ids, target){
   const cells = (ids || []).map(id => { const src = photoCache.get(id);
     return `<button type="button" class="thumb" data-photo="${esc(id)}" aria-label="View photo">${src ? `<img src="${src}" alt="">` : `<span>Not on this device yet</span>`}</button>`; }).join("");
-  const add = curJob().example ? "" : `<label class="thumb add" for="ph-${esc(target)}">＋<span>Photo</span></label><input type="file" id="ph-${esc(target)}" data-photo-target="${esc(target)}" accept="image/*" capture="environment" multiple hidden>`;
+  const t = esc(target);
+  const add = curJob().example ? "" : `<label class="thumb add" for="ph-${t}" data-photo-open="${t}">＋<span>Camera</span></label><input type="file" id="ph-${t}" data-photo-target="${t}" accept="image/*" capture="environment" hidden>`
+    + `<label class="thumb add alt" for="pg-${t}" data-photo-open="${t}"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 17-5-5-9 8"/></svg><span>Gallery</span></label><input type="file" id="pg-${t}" data-photo-target="${t}" accept="image/*" multiple hidden>`;
   return `<div class="thumbs">${cells}${add}</div>`;
 }
 function tabPhotos(){
@@ -703,7 +720,8 @@ function tabPhotos(){
     ${(p.slots[k] || []).length ? "" : `<details class="more"${p.na[k] ? " open" : ""}><summary>Can't photograph this?</summary><div>${field("Reason", "job.photos.na." + k, {ph:"e.g. Meter cupboard locked – no access"})}</div></details>`}
   </div>`;
   const obsWith = job.obs.filter(o => (o.photos || []).length);
-  return `<div class="card"><h2>Required photos <span class="count">${requiredSlots(job).length - miss.length} / ${requiredSlots(job).length}</span></h2>
+  const lostBanner = view.photoLost ? `<div class="warnline">Your phone closed the app while the camera was open (it does this to save memory), so that photo didn't come through. Take the photo with the phone's own camera app, then tap <b>Gallery</b> on the slot and pick it – that way nothing is lost. <button class="btn ghost sm" data-act="lostOk">OK</button></div>` : "";
+  return `${lostBanner}<div class="card"><h2>Required photos <span class="count">${requiredSlots(job).length - miss.length} / ${requiredSlots(job).length}</span></h2>
     <div class="muted small">Supply head, main fuse, earthing, and every board with the cover on and off. Photos are shrunk to save space and sync to the Photos folder in your Drive.</div></div>
   <div class="card"><h2>Supply &amp; earthing</h2>${requiredSlots(job).slice(0,3).map(slot).join("")}</div>
   ${job.boards.map(b => `<div class="card"><h2>${esc(b.ref || "Board")}${b.location ? ` <span class="count">${esc(b.location)}</span>` : ""}</h2>${[["b:"+b.id+":on", "Cover on"],["b:"+b.id+":off","Cover off"]].map(slot).join("")}</div>`).join("")}
@@ -722,9 +740,12 @@ function openViewer(id){
 document.addEventListener("change", async e => {
   const inp = e.target.closest && e.target.closest("[data-photo-target]");
   if (!inp) return;
-  const files = inp.files; await addPhotos(inp.dataset.photoTarget, files); inp.value = "";
+  clearPhotoPending();
+  const files = inp.files; if (files && files.length) toast(files.length > 1 ? `Adding ${files.length} photos…` : "Adding photo…");
+  await addPhotos(inp.dataset.photoTarget, files); inp.value = "";
 });
 document.addEventListener("click", e => {
+  const po = e.target.closest("[data-photo-open]"); if (po) markPhotoPending(po.dataset.photoOpen);
   const t = e.target.closest("[data-photo]");
   if (t) { openViewer(t.dataset.photo); return; }
   const vb = e.target.closest("[data-viewer]");
@@ -2536,6 +2557,7 @@ document.addEventListener("click", e => {
     case "chart": printHtml(circuitChartHtml(job, curBoard()), "circuits"); break;
     case "labels": case "openLabels": view.tab = "labels"; view.circ = null; render(); break;
     case "labToggle": { const c = curBoard().circuits[+a.dataset.i]; if (c) { c.noLabel = !c.noLabel; markDirty(job); rerender(); } break; }
+    case "lostOk": view.photoLost = null; rerender(); break;
     case "labCsv": saveLabelCsv(job, curBoard()); break;
     case "exAdd": { const b = curBoard(), k = a.dataset.kind, [t, m] = EXTRA_KINDS[k]; labExtras(job, b).push({ id: uid(), kind: k, text: t, sub: k === "rcd" ? "30mA" : "", pos: 0, mods: m }); markDirty(job); rerender(); break; }
     case "exDel": { const b = curBoard(); labExtras(job, b).splice(+a.dataset.i, 1); markDirty(job); rerender(); break; }
