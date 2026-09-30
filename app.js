@@ -68,6 +68,7 @@ let settings = { ...DEFAULT_SETTINGS };
 
 function newCircuit(no){ return { id:uid(), no:String(no), desc:"", wtype:"A", ref:"C", pts:"", live:"", cpc:"", ctype:"Final", dev:"", rating:"", ka:"6", rcd:"", rcdType:"", len:"", ring:"N", r1:"", rn:"", r2:"", r12:"", R2:"", irv:"500", irll:"", irle:"", pol:"", zs:"", rcdt:"", rcdt5:"", rcdbtn:"", afdd:"", remarks:"" }; }
 const TYPES = { EICR:"EICR", EIC:"EIC", MW:"Minor Works", PAT:"PAT" };
+Object.entries(window.BF_FORMS || {}).forEach(([k, f]) => { TYPES[k] = f.name; });
 const TYPE_LONG = { EICR:"Electrical Installation Condition Report", EIC:"Electrical Installation Certificate", MW:"Minor Electrical Installation Works Certificate", PAT:"Portable Appliance Test Register" };
 const typeOf = job => job.type || "EICR";
 const COMPANY_KEYS = ["company","inspector","position","address","phone","email","reg"];
@@ -88,6 +89,7 @@ function newJob(type = "EICR"){
   if (type !== "EICR") { job.extent = ""; job.limitations = ""; job.reason = type === "EIC" ? "New installation work" : "Minor works"; }
   if (type === "MW") { job.boards[0].circuits.push(newCircuit(1)); }
   if (type === "PAT") { job.boards = []; job.pat = { items: [] }; job.reason = "PAT testing"; }
+  if (window.BF_FORMS && window.BF_FORMS[type]) { job.boards = []; job.extent = ""; job.limitations = ""; job.reason = window.BF_FORMS[type].long; job.form = { v: { _inst: settings.mft || "" }, chk: {}, rows: {}, roles: [] }; }
   return job;
 }
 function normaliseJob(job){
@@ -98,6 +100,7 @@ function normaliseJob(job){
   if (!job.handover) job.handover = {};
   if (!job.client) job.client = {};
   if (typeOf(job) === "PAT" && !job.pat) job.pat = { items: [] };
+  if (window.BF_FORMS && window.BF_FORMS[job.type]) formInit(job);
   if (job.company) { const c = {}; COMPANY_KEYS.forEach(k => c[k] = job.company[k] ?? settings[k]); job.company = c; }
   Object.keys(job.insp || {}).forEach(k => { if (k.includes(".")) { job.insp[k.replace(".","_")] = job.insp[k]; delete job.insp[k]; } });
   return job;
@@ -247,6 +250,7 @@ function jobSummary(job){
   let nextDue = "";
   if (interval && job.inspDate){ const d = new Date(job.inspDate + "T12:00:00"); d.setMonth(d.getMonth() + Math.round(interval*12)); nextDue = d.toISOString().slice(0,10); }
   const type = typeOf(job);
+  if (FORMS[type]) { const fs = formSummary(job); const nd = (job.form && job.form.nextDue) || fs.nextDue; return { counts, fails: [], unwrittenFails: [], coded: [], inspFails: [], incomplete: [], tested: fs.rows, total: fs.rows, untested: 0, unsat: fs.outcome === "Unsatisfactory", started: fs.rows + fs.checksDone, years: null, interval: null, nextDue: nd, status: fs.outcome === "Unsatisfactory" ? "fail" : fs.outcome ? "pass" : "none", form: fs }; }
   if (type === "PAT") { const ps = patSummary(job); return { counts, fails: [], unwrittenFails: [], coded: [], inspFails: [], incomplete: [], tested: ps.pass + ps.fail, total: ps.total, untested: ps.none + ps.check, unsat: false, started: ps.total, years: null, interval: null, nextDue: "", status: ps.status, pat: ps }; }
   if (type !== "EICR") {
     const inspFails = inspFlat(job).filter(([id]) => job.insp[id.replace(".","_")] === "✗");
@@ -612,7 +616,7 @@ async function initPhotoQueue(){ const recs = await photoAll(); recs.forEach(r =
 function photoKeys(){ return new Promise(res => { try { const st = photoTx("readonly"); if (!st) return res([]); const q = st.getAllKeys(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); } catch(e){ res([]); } }); }
 function ensurePhotos(job){ if (!job.photos) job.photos = { slots:{}, na:{}, other:[] }; if (!job.photos.slots) job.photos.slots = {}; if (!job.photos.na) job.photos.na = {}; if (!job.photos.other) job.photos.other = []; (job.obs || []).forEach(o => { if (!o.photos) o.photos = []; }); return job.photos; }
 function requiredSlots(job){
-  if (typeOf(job) === "PAT") return [];
+  if (typeOf(job) === "PAT" || isForm(job)) return [];
   const s = [["supply","Supply head / cut-out"],["mainfuse","Main (supply) fuse"],["earthing","Earthing arrangement (main earthing terminal / conductor)"]];
   (job.boards || []).forEach(b => { s.push(["b:" + b.id + ":on", `${b.ref || "Board"} – cover on`]); s.push(["b:" + b.id + ":off", `${b.ref || "Board"} – cover off`]); });
   return s;
@@ -714,6 +718,7 @@ function thumbs(ids, target){
 function tabPhotos(){
   const job = j(), p = ensurePhotos(job), miss = missingPhotos(job);
   if (typeOf(job) === "PAT") return `<div class="card"><h2>Photos</h2><div class="muted small">Optional – e.g. failed items or labels. They print at the end of the register.</div>${thumbs(p.other, "other")}</div>`;
+  if (isForm(job)) return `<div class="card"><h2>Photos</h2><div class="muted small">Optional – panel, devices, labels, anything you need to show. They print at the end of the certificate.</div>${thumbs(p.other, "other")}</div>`;
   const slot = ([k, l]) => `<div class="slot ${(p.slots[k] || []).length || String(p.na[k] || "").trim() ? "done" : ""}">
     <div class="row"><b>${esc(l)}</b><span class="spacer"></span>${(p.slots[k] || []).length ? pill("pass", (p.slots[k].length) + " photo" + (p.slots[k].length === 1 ? "" : "s")) : String(p.na[k] || "").trim() ? pill("none","Not photographed") : pill("check","Required")}</div>
     ${thumbs(p.slots[k], k)}
@@ -737,7 +742,10 @@ function openViewer(id){
     <div class="vimg">${src ? `<img src="${src}" alt="Photo">` : `<div class="muted">This photo hasn't downloaded to this device yet.</div>`}</div>`;
   v.hidden = false;
 }
+document.addEventListener("toggle", e => { const d = e.target; if (d && d.matches && d.matches("details[data-frow]")) { if (d.open) view.frowOpen = d.dataset.frow; else if (view.frowOpen === d.dataset.frow) view.frowOpen = null; } }, true);
 document.addEventListener("change", e => {
+  const fb = e.target.closest && e.target.closest('input[data-bind^="job.form."]');
+  if (fb && view.screen === "job") updateFormHint(fb);
   const am = e.target.closest && e.target.closest("[data-am2e]");
   if (am) { tr().am2e[am.dataset.am2e] = am.checked; flush(); const h = am.closest(".card") && am.closest(".card").querySelector(".count"); if (h) { const box = am.closest(".card"); h.textContent = box.querySelectorAll("[data-am2e]:checked").length + "/" + box.querySelectorAll("[data-am2e]").length; } return; }
   const rb = e.target.closest && e.target.closest("[data-readboard]");
@@ -809,6 +817,7 @@ function photosSectionHtml(job, withObs){
 
 /* ---------------- automatic numbering: PREFIX-TYPE-YEAR-NNN, shared across devices through the Google script */
 const NUM_CODE = { EICR:"EICR", EIC:"EIC", MW:"MW", PAT:"PAT" };
+Object.entries(window.BF_FORMS || {}).forEach(([k, f]) => { NUM_CODE[k] = f.code || k; });
 function fmtNumber(type, year, n){ return `${settings.numPrefix || "BF"}-${NUM_CODE[type] || type}-${year}-${String(n).padStart(3, "0")}`; }
 async function assignNumber(job){
   if (!job || job.example || job.reportNo) { if (job) job.numPending = false; return; }
@@ -840,7 +849,7 @@ const normAddr = a => String(a || "").toLowerCase().split("\n")[0].replace(/[^a-
 function sameAddressJobs(job){
   const k = normAddr(job.address);
   if (k.length < 6) return [];
-  return liveJobs().filter(x => x.id !== job.id && normAddr(x.address) === k && typeOf(x) !== "PAT").sort((a,b) => String(b.inspDate).localeCompare(String(a.inspDate)));
+  return liveJobs().filter(x => x.id !== job.id && normAddr(x.address) === k && typeOf(x) !== "PAT" && !isForm(x)).sort((a,b) => String(b.inspDate).localeCompare(String(a.inspDate)));
 }
 function copyFrom(dst, src){
   dst.client = {...src.client}; dst.address = src.address; dst.occupier = src.occupier; dst.premises = src.premises;
@@ -862,7 +871,7 @@ function prevJobsCard(job){
   if (job.example) return "";
   const hasData = job.boards.some(b => b.circuits.some(c => c.desc || c.dev));
   const prev = sameAddressJobs(job);
-  const reuse = typeOf(job) === "PAT" ? "" : `<div class="card"><h2>Re-use this job</h2><div class="muted small">Start a new job at this address with the same client, supply, boards and circuits – test results are cleared.</div>
+  const reuse = typeOf(job) === "PAT" || isForm(job) ? "" : `<div class="card"><h2>Re-use this job</h2><div class="muted small">Start a new job at this address with the same client, supply, boards and circuits – test results are cleared.</div>
     <div class="row">${["EICR","EIC","MW"].map(t => `<button class="btn ghost sm" data-act="newFrom" data-type="${t}">New ${esc(TYPES[t])}</button>`).join("")}</div></div>`;
   if (!prev.length || hasData || job.copiedFrom) return reuse;
   return `<div class="card"><h2>Been here before</h2><div class="muted small">Copy the client, supply, boards and circuits from a previous job at this address. Test results aren't copied.</div>
@@ -999,7 +1008,7 @@ function drawLabelPreview(){
   const m = document.getElementById("labmeta"); if (m) m.textContent = `${n} label${n === 1 ? "" : "s"} · about ${Math.round(cv.width / DPMM / 10)} cm of 24 mm tape`;
 }
 function labelsCard(job){
-  if (job.example || typeOf(job) === "PAT" || !job.boards.some(b => b.circuits.length)) return "";
+  if (job.example || typeOf(job) === "PAT" || isForm(job) || !job.boards.some(b => b.circuits.length)) return "";
   return `<div class="card"><h2>Circuit labels</h2><div class="muted small">Print a label for every circuit on the Brother on 24 mm tape – nothing is sent anywhere.</div><button class="btn block" data-act="openLabels">Labels</button></div>`;
 }
 function tabLabels(){
@@ -1146,7 +1155,7 @@ async function sendDanger(){
 /* ---------------- re-inspections due */
 function dueList(){
   const byAddr = new Map();
-  liveJobs().filter(x => ["EICR","EIC"].includes(typeOf(x)) && x.address).forEach(x => { const k = normAddr(x.address); const cur = byAddr.get(k); if (!cur || String(x.inspDate) > String(cur.inspDate)) byAddr.set(k, x); });
+  liveJobs().filter(x => (["EICR","EIC"].includes(typeOf(x)) || isForm(x)) && x.address).forEach(x => { const k = normAddr(x.address) + (isForm(x) ? "|" + typeOf(x) : ""); const cur = byAddr.get(k); if (!cur || String(x.inspDate) > String(cur.inspDate)) byAddr.set(k, x); });
   const soon = new Date(); soon.setMonth(soon.getMonth() + 3); const lim = soon.toISOString().slice(0, 10);
   return [...byAddr.values()].map(x => ({job: x, due: jobSummary(x).nextDue})).filter(x => x.due && x.due <= lim).sort((a,b) => a.due.localeCompare(b.due));
 }
@@ -1159,7 +1168,7 @@ function renderDue(){
       <div class="small muted">${esc(c.name || "No client name")} · last ${esc(TYPES[typeOf(job)])} ${esc(ukDate(job.inspDate))}${job.contactedAt ? " · contacted " + esc(agoText(job.contactedAt)) : ""}</div>
       <div class="row">${c.phone ? `<a class="btn ghost sm" href="tel:${esc(c.phone.replace(/\s/g, ""))}">Call</a>` : ""}${c.email ? `<a class="btn ghost sm" href="mailto:${esc(c.email)}?subject=${encodeURIComponent("Electrical inspection due – " + jobTitle(job))}&body=${msg}">Email</a>` : ""}
         <button class="btn ghost sm" data-act="contacted" data-id="${esc(job.id)}">${job.contactedAt ? "Contacted ✓" : "Mark contacted"}</button>
-        <button class="btn sm" data-act="reinspect" data-id="${esc(job.id)}">Start EICR</button></div>
+        <button class="btn sm" data-act="reinspect" data-id="${esc(job.id)}">Start ${esc(isForm(job) ? TYPES[typeOf(job)] : "EICR")}</button></div>
       ${!c.phone && !c.email ? `<div class="muted small">No phone or email saved for this client.</div>` : ""}</div>`; }).join("")
     : `<div class="empty">Nothing due in the next 3 months.</div>`}
     <div class="muted small">Based on the most recent EICR or EIC at each address and its recommended interval.</div></main>`;
@@ -1345,6 +1354,120 @@ function billingCard(){
     ${settings.role === "Tester" ? "" : `${settings.sendUrl ? "" : `<div class="warnline">Set up sync first – the passcode is checked by your Google script so it can't be bypassed on another phone.</div>`}
     <label class="field" for="ownercode"><span>Owner passcode</span><input id="ownercode" type="password" autocomplete="off" class="num"></label>
     <button class="btn sm" data-act="billingOn" ${settings.sendUrl ? "" : "disabled"}>Unlock owner access</button><div id="billmsg"></div>`}</div>`;
+}
+
+/* ---------------- form certificates: fire alarm, emergency lighting, EV charge point, solar PV (driven by bf-forms.js) */
+const FORMS = window.BF_FORMS || {};
+const isForm = job => !!FORMS[typeOf(job)];
+function formInit(job){ const f = job.form = job.form || {}; f.v = f.v || {}; f.chk = f.chk || {}; f.rows = f.rows || {}; f.roles = f.roles || []; return f; }
+function formFieldFail(fd, val, job){
+  const n = num(val); if (n === null) return "";
+  if (fd.min != null && n < fd.min) return `below ${fd.min}${fd.unit ? " " + fd.unit : ""}`;
+  if (fd.max != null && n > fd.max) return `above ${fd.max}${fd.unit ? " " + fd.unit : ""}`;
+  if (fd.minFrom) { const ref = num(formInit(job).v[fd.minFrom]); if (ref !== null && n < ref) return `below ${ref} required`; }
+  return "";
+}
+function formSummary(job){
+  const F = FORMS[typeOf(job)], f = formInit(job); let fails = 0, rows = 0, checksDone = 0, checksTot = 0; const probs = [];
+  F.sections.forEach(s => s.fields.forEach(fd => { const w = formFieldFail(fd, f.v[fd.k], job); if (w) { fails++; probs.push(`${fd.label}: ${w}`); } }));
+  F.checks.forEach(c => c.items.forEach(([id, l]) => { checksTot++; const v = f.chk[c.id + "_" + id]; if (v) checksDone++; if (v === "✗") { fails++; probs.push(l); } }));
+  F.tables.forEach(t => (f.rows[t.id] || []).forEach((r, i) => { rows++; t.cols.forEach(c => { const w = formFieldFail(c, r[c.k], job); if (w) { fails++; probs.push(`${t.row} ${r.ref || r.loc || i + 1} – ${c.label}: ${w}`); } }); if (r.res === "✗") { fails++; probs.push(`${t.row} ${r.ref || r.loc || i + 1} failed`); } }));
+  let nextDue = f.v.next || f.v.nexta || "";
+  if (!nextDue && F.intervalMonths && job.inspDate) { const d = new Date(job.inspDate + "T12:00:00"); d.setMonth(d.getMonth() + F.intervalMonths); nextDue = d.toISOString().slice(0, 10); }
+  return { fails, rows, checksDone, checksTot, probs, nextDue, outcome: f.outcome || "" };
+}
+function formFieldHtml(fd, bind, job, val){
+  if (fd.t === "chips") return chips(fd.label, bind, fd.opts, { small: fd.opts.length > 4 || fd.opts.some(o => String(o).length > 14) });
+  const w = fd.t === "num" ? formFieldFail(fd, val, job) : "";
+  const rule = fd.min != null ? `Min ${fd.min}${fd.unit ? " " + fd.unit : ""}` : fd.max != null ? `Max ${fd.max}${fd.unit ? " " + fd.unit : ""}` : fd.minFrom ? "At least the rated duration" : "";
+  return field(fd.label, bind, { num: fd.t === "num", unit: fd.unit, type: fd.t === "date" ? "date" : "", area: fd.t === "area", ph: fd.ph || "",
+    hint: (w ? `<span class="rulefail">✗ ${esc(w)}</span> ` : "") + (rule && !w ? `<span class="muted">${esc(rule)}</span>` : "") + (fd.hint ? esc(fd.hint) : "") });
+}
+function formFrom(src){
+  const nj = newJob(typeOf(src)); ["client","address","occupier"].forEach(k => nj[k] = JSON.parse(JSON.stringify(src[k] || "")));
+  const f = formInit(nj), sf = formInit(src), F = FORMS[typeOf(src)];
+  F.sections.forEach(s => s.fields.forEach(fd => { if (fd.t !== "date" && !/defect|notes|recs|vars/i.test(fd.k) && sf.v[fd.k] != null) f.v[fd.k] = sf.v[fd.k]; }));
+  f.v._inst = sf.v._inst || f.v._inst;
+  F.tables.forEach(t => { if (t.cols.some(c => c.t === "date")) return; f.rows[t.id] = (sf.rows[t.id] || []).map(r => { const n = {}; t.cols.forEach(c => { if (c.t === "text" || (c.t === "chips" && c.k !== "res")) n[c.k] = r[c.k]; }); return n; }); });
+  return nj;
+}
+function updateFormHint(el){
+  const job = j(); if (!job || !isForm(job)) return;
+  const F = FORMS[typeOf(job)], p = el.dataset.bind.split("."); let fd = null;
+  if (p[2] === "v") F.sections.forEach(s => s.fields.forEach(x => { if (x.k === p[3]) fd = x; }));
+  else if (p[2] === "rows") { const t = F.tables.find(x => x.id === p[3]); fd = t && t.cols.find(x => x.k === p[5]); }
+  if (!fd || fd.t !== "num") return;
+  const w = formFieldFail(fd, el.value, job), lab = el.closest("label.field"); if (!lab) return;
+  let h = lab.querySelector(".hint"); if (!h) { h = document.createElement("span"); h.className = "hint"; lab.appendChild(h); }
+  const rule = fd.min != null ? `Min ${fd.min}${fd.unit ? " " + fd.unit : ""}` : fd.max != null ? `Max ${fd.max}${fd.unit ? " " + fd.unit : ""}` : fd.minFrom ? "At least the rated duration" : "";
+  h.innerHTML = w ? `<span class="rulefail">✗ ${esc(w)}</span>` : rule ? `<span class="muted">${esc(rule)}</span>` : "";
+  if (p[2] === "rows") { const d = el.closest("details.frow"), t = F.tables.find(x => x.id === p[3]), row = (formInit(job).rows[p[3]] || [])[+p[4]]; if (d && t && row) { const sm = d.querySelector("summary"); if (sm) sm.innerHTML = formRowSummary(t, row, +p[4], job); } }
+}
+function formSiteTab(){
+  const job = j(), F = FORMS[typeOf(job)];
+  return `<div class="card"><h2>${esc(F.name)}</h2><div class="muted small">${esc(F.intro || "")}</div><div class="grid2">${field("Certificate number","job.reportNo")}${field("Date","job.inspDate",{type:"date"})}</div></div>
+  <div class="card"><h2>Client &amp; site</h2>${field("Client","job.client.name")}<div class="grid2">${field("Telephone","job.client.phone",{type:"tel"})}${field("Email","job.client.email",{type:"email"})}</div>${field("Site address","job.address",{area:true})}</div>
+  <div class="card"><h2>Instruments</h2>${field("Test instruments (make / serial)","job.form.v._inst",{ph: settings.mft || ""})}</div>`;
+}
+function formDetailsTab(){
+  const job = j(), F = FORMS[typeOf(job)], f = formInit(job);
+  return F.sections.map(s => `<div class="card"><h2>${esc(s.title)}</h2>${s.fields.map(fd => formFieldHtml(fd, "job.form.v." + fd.k, job, f.v[fd.k])).join("")}</div>`).join("");
+}
+function formChecksTab(){
+  const job = j(), F = FORMS[typeOf(job)], f = formInit(job);
+  return F.checks.map(c => { const done = c.items.filter(([id]) => f.chk[c.id + "_" + id]).length;
+    return `<div class="card"><h2>${esc(c.title)} <span class="count">${done}/${c.items.length}</span></h2>
+      <button class="btn ghost sm" data-act="formAllOk" data-c="${esc(c.id)}">Mark the rest ✓</button>
+      ${c.items.map(([id, l]) => `<div class="insp-item"><div class="q">${esc(l)}</div>${chips("", "job.form.chk." + c.id + "_" + id, ["✓","✗","N/A"], {small:true})}</div>`).join("")}</div>`; }).join("");
+}
+function formRowSummary(t, r, i, job){
+  const bad = t.cols.some(c => formFieldFail(c, r[c.k], job)) || r.res === "✗";
+  const bits = t.cols.filter(c => c.t !== "date" && r[c.k] && c.k !== "res").slice(0, 3).map(c => r[c.k]);
+  return `<b>${esc(r.ref || String(i + 1))}</b> ${esc(bits.filter(x => x !== r.ref).join(" · ").slice(0, 70) || "New " + t.row.toLowerCase())} ${bad ? pill("fail","FAIL") : r.res === "✓" ? pill("pass","PASS") : ""}`;
+}
+function formSchedTab(){
+  const job = j(), F = FORMS[typeOf(job)], f = formInit(job);
+  return F.tables.map(t => { const rows = f.rows[t.id] = f.rows[t.id] || [];
+    return `<div class="card"><h2>${esc(t.title)} <span class="count">${rows.length}</span></h2>
+      ${rows.map((r, i) => `<details class="frow"${view.frowOpen === t.id + ":" + i ? " open" : ""} data-frow="${esc(t.id + ":" + i)}"><summary>${formRowSummary(t, r, i, job)}</summary><div>
+        ${t.cols.map(c => formFieldHtml(c, `job.form.rows.${t.id}.${i}.${c.k}`, job, r[c.k])).join("")}
+        <div class="row"><button class="btn ghost sm" data-act="frowDup" data-t="${esc(t.id)}" data-i="${i}">Copy to a new ${esc(t.row.toLowerCase())}</button><span class="spacer"></span><button class="btn ghost sm" data-act="frowDel" data-t="${esc(t.id)}" data-i="${i}">Remove</button></div></div></details>`).join("")}
+      <button class="btn block" data-act="frowAdd" data-t="${esc(t.id)}">+ Add ${esc(t.row.toLowerCase())}</button></div>`; }).join("");
+}
+function formCertTab(){
+  const job = j(), F = FORMS[typeOf(job)], f = formInit(job), s = formSummary(job);
+  return `<div class="banner ${f.outcome === "Unsatisfactory" ? "fail" : f.outcome ? "pass" : "none"}"><span class="small">${esc(F.name)}</span><strong>${esc(f.outcome ? f.outcome.toUpperCase() : "Result not set")}</strong><span class="small">${s.rows} ${esc(F.tables[0] ? F.tables[0].row.toLowerCase() + (s.rows === 1 ? "" : "s") : "")} · ${s.checksDone}/${s.checksTot} checks</span></div>
+    ${s.probs.length ? `<div class="card"><h2>Problems found (${s.probs.length})</h2>${s.probs.slice(0, 12).map(p => `<div class="errline small">${esc(p)}</div>`).join("")}${s.probs.length > 12 ? `<div class="small muted">…and ${s.probs.length - 12} more</div>` : ""}</div>` : ""}
+    <div class="card"><h2>Result &amp; next visit</h2>
+      <div class="field"><span>This certificate covers</span><div class="chips">${F.declare.roles.map(r => `<button type="button" class="chip small" data-act="formRole" data-r="${esc(r)}" aria-pressed="${f.roles.includes(r)}">${esc(r)}</button>`).join("")}</div></div>
+      ${chips("Overall result","job.form.outcome",["Satisfactory","Unsatisfactory"])}
+      ${s.fails && f.outcome === "Satisfactory" ? `<div class="warnline">${s.fails} problem${s.fails === 1 ? "" : "s"} recorded – make sure they're covered as variations or put right before marking satisfactory.</div>` : ""}
+      <div class="muted small">${esc(F.interval || "")}</div>
+      <div class="grid2">${field("Next inspection / service due","job.form.nextDue",{type:"date", hint: s.nextDue && !f.nextDue ? "Suggested " + ukDate(s.nextDue) : ""})}${field("Date of issue","job.issueDate",{type:"date"})}</div></div>
+    <div class="card"><h2>Declaration</h2><div class="small">${esc(F.declare.text)}</div><div class="grid2">${field("Name","job.inspector")}${field("Position","job.position")}</div>${!billingOk() ? "" : signBlock(job)}
+      <div class="grid2">${field("Date signed","job.sigDate",{type:"date"})}</div></div>
+    ${!billingOk() ? signBlock(job) : ""}${handoverCard(job)}${finishCard(job)}`;
+}
+function exportForm(job){
+  const F = FORMS[typeOf(job)], f = formInit(job), s = formSummary(job), co = job.company || settings;
+  const kv = pairs => { let h = ""; for (let i = 0; i < pairs.length; i += 2) { const [a, b] = [pairs[i], pairs[i + 1]]; h += `<tr><th>${esc(a[0])}</th><td>${a[1]}</td>${b ? `<th>${esc(b[0])}</th><td>${b[1]}</td>` : `<th></th><td></td>`}</tr>`; } return `<table class="kv"><tbody>${h}</tbody></table>`; };
+  const val = (fd, v) => { if (v == null || v === "") return ""; const w = formFieldFail(fd, v, job); const t = fd.t === "date" ? ukDate(v) : esc(v) + (fd.unit && fd.t === "num" ? " " + esc(fd.unit) : ""); return w ? `<b style="color:#B42318">${t} ✗</b>` : fd.t === "area" ? t.replace(/\n/g, "<br>") : t; };
+  const secs = F.sections.map(sec => { const p = sec.fields.filter(fd => fd.t !== "area").map(fd => [fd.label, val(fd, f.v[fd.k])]); const areas = sec.fields.filter(fd => fd.t === "area" && f.v[fd.k]);
+    return `<h2>${esc(sec.title)}</h2>${kv(p)}${areas.map(fd => `<table class="kv"><tbody><tr><th>${esc(fd.label)}</th><td>${val(fd, f.v[fd.k])}</td></tr></tbody></table>`).join("")}`; }).join("");
+  const chks = F.checks.map(c => `<h2>${esc(c.title)}</h2><table class="insp"><tbody>${c.items.map(([id, l]) => `<tr><td>${esc(l)}</td><td class="c">${esc(f.chk[c.id + "_" + id] || "")}</td></tr>`).join("")}</tbody></table>`).join("");
+  const tabs = F.tables.map(t => { const rows = f.rows[t.id] || []; if (!rows.length) return "";
+    return `<section class="wide"><h2>${esc(t.title)}</h2><table class="sched"><thead><tr><th>#</th>${t.cols.map(c => `<th>${esc(c.label)}${c.unit ? " (" + esc(c.unit) + ")" : ""}</th>`).join("")}</tr></thead><tbody>${rows.map((r, i) => `<tr class="${t.cols.some(c => formFieldFail(c, r[c.k], job)) || r.res === "✗" ? "fail" : ""}"><td>${i + 1}</td>${t.cols.map(c => `<td>${val(c, r[c.k])}</td>`).join("")}</tr>`).join("")}</tbody></table></section>`; }).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(F.long)} – ${esc(jobTitle(job))}</title><style>${REPORT_CSS}</style></head><body>
+${band(co, true)}
+<div class="sub">${esc(F.long)} – ${esc(F.std || "")}</div>
+${kv([["Certificate number", esc(job.reportNo)], ["Date", esc(ukDate(job.inspDate))], ["Client", esc(job.client.name || "")], ["Site", esc(job.address || "").replace(/\n/g, "<br>")], ["Contractor", esc(co.company || "")], ["Instruments", esc(f.v._inst || "")]])}
+<div class="big ${f.outcome === "Unsatisfactory" ? "fail" : f.outcome ? "pass" : ""}">${esc(f.outcome ? "Overall: " + f.outcome.toUpperCase() : "Overall result not recorded")}</div>
+${secs}${chks}${tabs}
+<h2>Declaration</h2><p class="note">${esc(F.declare.text)}</p>
+${kv([["Covers", esc(f.roles.join(", ") || "–")], ["Next inspection / service due", esc(ukDate(f.nextDue || s.nextDue))], ["Name", esc(job.inspector || "")], ["Position", esc(job.position || "")], ["Signature", job.sig ? `<img src="${job.sig}" alt="" style="max-height:60px">` : ""], ["Date signed", esc(ukDate(job.sigDate))]])}
+${job.handover && job.handover.name ? `<h2>Received by</h2>${kv([["Name", esc(job.handover.name)], ["Date", esc(ukDate(job.handover.date))], ["Signature", job.handover.sig ? `<img src="${job.handover.sig}" alt="" style="max-height:60px">` : ""]])}` : ""}
+${photosSectionHtml(job, false)}
+<footer>${esc(co.company || "BlueForge Engineering")} – ${esc(F.name)} ${esc(job.reportNo || "")} – ${esc(job.address || "")}</footer></body></html>`;
 }
 
 /* ---------------- training (EWA / AM2E / 2391) */
@@ -1884,6 +2007,7 @@ function jobTitle(job){ return (job.address || job.client.name || "Untitled job"
 function outcomeText(job){
   const s = jobSummary(job), t = typeOf(job);
   if (t === "EICR") return s.status === "fail" ? "UNSATISFACTORY" : s.status === "pass" ? "SATISFACTORY" : "not yet assessed";
+  if (FORMS[typeOf(job)]) return s.form.outcome ? s.form.outcome.toUpperCase() : "result not set";
   return s.status === "fail" ? "TEST FAILURES" : s.status === "pass" ? "all tests passed" : "tests incomplete";
 }
 function reportSubject(job){ return `${TYPES[typeOf(job)]} ${job.reportNo ? job.reportNo + " – " : ""}${jobTitle(job)} – ${ukDate(job.inspDate)} – ${outcomeText(job)}`; }
@@ -2196,8 +2320,11 @@ const icon = n => ({
   pat:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3v5M15 3v5M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v3"/></svg>',
   photos:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
   cert:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16"/><path d="M14.5 4.5l5 5L9 20H4v-5z"/></svg>',
+  form:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg>',
+  checks:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h10M4 12h10M4 18h10"/><path d="m16 6 2 2 3-4M16 18l2 2 3-4"/></svg>',
+  sched:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg>',
   report:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 3 20h18z"/><path d="M12 10v4M12 17v.5"/></svg>'
-}[n]);
+}[n] || "");
 
 /* ------------------------------------------------------------------ derived blocks (live-updated) */
 const DERIVED = {
@@ -2265,13 +2392,14 @@ function rerender(){ view.keepScroll = true; render(); }
 function jobPill(j){
   const s = jobSummary(j), t = typeOf(j);
   if (j.handoff && !j.sig && billingOk()) return pill("check","Ready to sign");
+  if (FORMS[t]) return s.form.outcome ? pill(s.form.outcome === "Unsatisfactory" ? "fail" : "pass", s.form.outcome.toUpperCase()) : pill("none","In progress");
   if (t === "PAT") return s.total ? pill(s.pat.fail ? "fail" : s.status === "pass" ? "pass" : "none", `${s.pat.pass} pass · ${s.pat.fail} fail`) : pill("none","In progress");
   if (t === "EICR") return s.status === "fail" ? pill("fail","UNSATISFACTORY") : s.status === "pass" && s.tested ? pill("pass","SATISFACTORY") : pill("none","In progress");
   return s.status === "fail" ? pill("fail","TEST FAILURES") : s.status === "pass" ? pill("pass","ALL PASSED") : pill("none","In progress");
 }
 function jobCard(j){
-  const circ = typeOf(j) === "PAT" ? ((j.pat && j.pat.items) || []).length : j.boards.reduce((n,b) => n + b.circuits.length, 0);
-  const unit = typeOf(j) === "PAT" ? "item" : "circuit";
+  const circ = typeOf(j) === "PAT" ? ((j.pat && j.pat.items) || []).length : FORMS[typeOf(j)] ? formSummary(j).rows : j.boards.reduce((n,b) => n + b.circuits.length, 0);
+  const unit = typeOf(j) === "PAT" ? "item" : FORMS[typeOf(j)] ? ((FORMS[typeOf(j)].tables[0] || {}).row || "item").toLowerCase() : "circuit";
   const extra = [];
   if (!j.example && (j.sentAt || j.sendQueued)) extra.push(sendStatus(j));
   if (j.handoff && settings.role === "Tester") extra.push(pill("none", "Sent for sign-off"));
@@ -2295,6 +2423,7 @@ function renderHome(){
       <button class="card-link" data-act="newType" data-type="EIC"><div class="grow"><div class="t">EIC</div><div class="d">New installation, new circuits, consumer unit change</div></div></button>
       <button class="card-link" data-act="newType" data-type="MW"><div class="grow"><div class="t">Minor Works</div><div class="d">Addition or alteration that doesn't add a new circuit</div></div></button>
       <button class="card-link" data-act="newType" data-type="PAT"><div class="grow"><div class="t">PAT register</div><div class="d">Portable appliance testing</div></div></button>
+      ${Object.entries(FORMS).map(([k, f]) => `<button class="card-link" data-act="newType" data-type="${esc(k)}"><div class="grow"><div class="t">${esc(f.name)}</div><div class="d">${esc(f.long)} · ${esc(f.std || "")}</div></div></button>`).join("")}
       <button class="btn ghost sm" data-act="chooserOff">Cancel</button></div>`
       : `<button class="btn block" data-act="chooser">+ New</button>`}
     <div class="tiles">
@@ -2391,12 +2520,14 @@ function renderSettings(){
   </main>`;
 }
 
+Object.entries(window.BF_FORMS || {}).forEach(([k, f]) => { TYPE_LONG[k] = f.long; });
 const TABS = {
   EICR: [["job","Job"],["supply","Supply"],["circuits","Circuits"],["inspect","Inspect"],["photos","Photos"],["report","Report"]],
   EIC:  [["job","Work"],["supply","Supply"],["circuits","Circuits"],["inspect","Inspect"],["photos","Photos"],["cert","Certify"]],
   MW:   [["job","Work"],["supply","Supply"],["circuits","Circuit"],["photos","Photos"],["cert","Certify"]],
   PAT:  [["job","Site"],["pat","Items"],["photos","Photos"],["cert","Certify"]]
 };
+Object.entries(window.BF_FORMS || {}).forEach(([k, f]) => { TABS[k] = [["job","Site"],["form","Details"],["checks","Checks"]].concat(f.tables.length ? [["sched", f.tables[0].row + "s"]] : []).concat([["photos","Photos"],["cert","Certify"]]); });
 function renderJob(){
   const job = curJob();
   const t = typeOf(job);
@@ -2404,7 +2535,7 @@ function renderJob(){
   if (view.tab === "circuits" && curCirc()) return renderCircuit();
   if (view.tab === "pat" && view.patItem && job.pat && job.pat.items.some(x => x.id === view.patItem)) return renderPatItem();
   loadJobPhotos(job);
-  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, labels:tabLabels, readboard:tabReadBoard, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
+  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : FORMS[t] ? formSiteTab : tabWork, form: formDetailsTab, checks: formChecksTab, sched: formSchedTab, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, labels:tabLabels, readboard:tabReadBoard, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
   return `<header class="top"><button class="iconbtn" data-act="home" aria-label="All jobs">←</button><h1>${esc(jobTitle(job) === "Untitled job" ? "New " + TYPES[t] : jobTitle(job))}<span class="sub">${job.example ? "Example – not saved" : esc(TYPES[t]) + (job.reportNo ? " · " + esc(job.reportNo) : "")}</span></h1></header>
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example report – edits aren't saved</div>` : statusHtml()}
   ${job.handoff && !job.sig && billingOk() && view.tab === "job" ? `<main style="padding-bottom:0"><div class="warnline">Tested by ${esc(job.handoff.by)} and sent for sign-off ${esc(agoText(job.handoff.at))}. Check it through, then sign on the ${t === "EICR" ? "Report" : "Certify"} tab.</div></main>` : ""}
@@ -2456,6 +2587,7 @@ function signBlock(job){
 }
 function tabCert(){
   const job = j(), t = typeOf(job), s = jobSummary(job), w = job.work;
+  if (FORMS[t]) return formCertTab();
   if (t === "PAT") {
     const ps = s.pat, probs = [];
     if (!ps.total) probs.push(`<div class="warnline">No items added yet.</div>`);
@@ -2510,11 +2642,13 @@ function finishCard(job){
        <button class="btn ghost sm" data-act="shareJob">Share job file</button>`
     : (() => { const blockers = [];
         if (!job.sig) blockers.push("sign the declaration");
-        if (t === "PAT" && jobSummary(job).status !== "pass") blockers.push("finish testing every item");
+        if (FORMS[t] && !(job.form && job.form.outcome)) blockers.push("choose the overall result");
+        else if (FORMS[t]) {}
+        else if (t === "PAT" && jobSummary(job).status !== "pass") blockers.push("finish testing every item");
         else if (t !== "EICR" && t !== "PAT" && jobSummary(job).status !== "pass") blockers.push("get every circuit tested and passing");
         const mp = missingPhotos(job).length; if (mp) blockers.push(`take the required photos (${mp} missing – see the Photos tab)`);
         return blockers.length ? `<button class="btn block" disabled style="opacity:.5">Finish &amp; send to office</button><div class="warnline">Before finishing: ${blockers.join(" and ")}.</div>` : "";
-      })() + `<button class="btn block" data-act="finish" ${!job.sig || (t !== "EICR" && jobSummary(job).status !== "pass") || missingPhotos(job).length ? "hidden" : ""}>${job.sentAt || job.sendQueued ? "Send again to office" : "Finish &amp; send to office"}</button>
+      })() + `<button class="btn block" data-act="finish" ${!job.sig || (FORMS[t] ? !(job.form && job.form.outcome) : (t !== "EICR" && jobSummary(job).status !== "pass")) || missingPhotos(job).length ? "hidden" : ""}>${job.sentAt || job.sendQueued ? "Send again to office" : "Finish &amp; send to office"}</button>
        <div class="row small"><span class="muted">To ${esc(settings.officeEmail)}${settings.sendUrl ? " and your Google Drive" : ""}. ${IOS ? (settings.sendUrl ? "Choose <b>Save to Files</b> to keep a copy on the phone." : "Choose <b>Mail</b> to send it to the office, or <b>Save to Files</b> to keep a copy.") : "A copy is also saved to Downloads."}</span>${sendStatus(job)}</div>
        ${job.sendError && job.sendQueued ? `<div class="warnline">Not sent yet: ${esc(job.sendError)}. It will keep trying.</div>` : ""}
        `;
@@ -2925,6 +3059,11 @@ document.addEventListener("click", e => {
       try { await api("setAiKey", { aiKey: k.trim() }); settings.aiReady = true; lsWrite(); rerender(); toast("AI key saved to your Google script"); }
       catch(err){ if (m) m.innerHTML = `<div class="errline">${esc(/Unknown action/i.test(err.message) ? "Your Google script needs updating first – paste in the new script and redeploy." : err.message)}</div>`; } })(); break;
     case "aiOff": (async () => { try { await api("setAiKey", { aiKey: "" }); settings.aiReady = false; lsWrite(); rerender(); toast("AI key removed"); } catch(err){ toast(String(err.message || err)); } })(); break;
+    case "formAllOk": { const F = FORMS[typeOf(job)], f = formInit(job), c = F.checks.find(x => x.id === a.dataset.c); if (c) c.items.forEach(([id]) => { if (!f.chk[c.id + "_" + id]) f.chk[c.id + "_" + id] = "✓"; }); markDirty(job); rerender(); break; }
+    case "formRole": { const f = formInit(job), r = a.dataset.r, i = f.roles.indexOf(r); if (i >= 0) f.roles.splice(i, 1); else f.roles.push(r); markDirty(job); rerender(); break; }
+    case "frowAdd": { const f = formInit(job), rows = f.rows[a.dataset.t] = f.rows[a.dataset.t] || []; rows.push({ ref: String(rows.length + 1) }); view.frowOpen = a.dataset.t + ":" + (rows.length - 1); markDirty(job); rerender(); break; }
+    case "frowDup": { const f = formInit(job), rows = f.rows[a.dataset.t], src = rows[+a.dataset.i]; const n = Object.assign({}, src, { ref: String(rows.length + 1), res: "" }); rows.push(n); view.frowOpen = a.dataset.t + ":" + (rows.length - 1); markDirty(job); rerender(); break; }
+    case "frowDel": { const f = formInit(job); f.rows[a.dataset.t].splice(+a.dataset.i, 1); view.frowOpen = null; markDirty(job); rerender(); break; }
     case "lostOk": view.photoLost = null; rerender(); break;
     case "labCsv": saveLabelCsv(job, curBoard()); break;
     case "exAdd": { const b = curBoard(), k = a.dataset.kind, [t, m] = EXTRA_KINDS[k]; labExtras(job, b).push({ id: uid(), kind: k, text: t, sub: k === "rcd" ? "30mA" : "", pos: 0, mods: m }); markDirty(job); rerender(); break; }
@@ -2965,7 +3104,7 @@ document.addEventListener("click", e => {
     case "askRemove": askLog().splice(+a.dataset.i, 1); lsWrite(); rerender(); break;
     case "askClear": settings.askLog = []; lsWrite(); rerender(); break;
     case "contacted": { const x = jobs.find(y => y.id === a.dataset.id); if (x) { x.contactedAt = Date.now(); x.updated = Date.now(); lsWrite(); scheduleSync(3000); } rerender(); break; }
-    case "reinspect": { const src = jobs.find(y => y.id === a.dataset.id); if (!src) break; const nj = newJobFrom(src, "EICR"); jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); break; }
+    case "reinspect": { const src = jobs.find(y => y.id === a.dataset.id); if (!src) break; const nj = isForm(src) ? formFrom(src) : newJobFrom(src, "EICR"); jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); break; }
     case "addPat": { job.pat.items.push(newPatItem(job.pat.items.length + 1)); view.patItem = job.pat.items[job.pat.items.length - 1].id; markDirty(job); render(); break; }
     case "patItem": view.patItem = a.dataset.id; view.confirmDel = null; render(); break;
     case "patBack": view.patItem = null; view.confirmDel = null; render(); break;
@@ -3091,6 +3230,7 @@ footer{margin-top:14px;font-size:9px;color:#555;text-align:center}
 `;
 function exportHtml(job){
   if (typeOf(job) === "PAT") return exportPat(job);
+  if (isForm(job)) return exportForm(job);
   if (typeOf(job) !== "EICR") return exportCert(job);
   const s = jobSummary(job), sup = calcSupply(job), co = job.company || settings;
   const row = (l, v) => `<tr><th>${esc(l)}</th><td>${esc(v ?? "")}</td></tr>`;

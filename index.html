@@ -85,6 +85,10 @@ button,input,select,textarea{font:inherit;color:inherit}
 .qscore{text-align:center}.qscore b{display:block;font-family:var(--f-display);font-size:40px}.qscore.ok b{color:var(--pass)}.qscore.mid b{color:var(--check)}.qscore.no b{color:var(--fail)}
 .qreview{border-top:1px solid var(--line);padding:10px 0}.qreview .qtext{font-size:14.5px;margin:0 0 4px}
 .amitem{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--line);font-size:15px;cursor:pointer}.amitem input{width:22px;height:22px;flex:none;margin-top:1px}
+.rulefail{color:var(--fail);font-weight:700}
+details.frow{border:1px solid var(--line);border-radius:12px;padding:0 12px;margin-bottom:8px;background:var(--field)}
+details.frow>summary{padding:12px 0;cursor:pointer;display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:15px}
+details.frow[open]>summary{border-bottom:1px solid var(--line);margin-bottom:8px}
 ol.steps{margin:6px 0 8px;padding-left:20px;display:flex;flex-direction:column;gap:6px}
 .top h1{font-family:var(--f-display);font-weight:700;font-size:20px;margin:0;letter-spacing:.02em;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .top .sub{display:block;font-family:var(--f-body);font-weight:400;font-size:12px;opacity:.75;letter-spacing:0;overflow:hidden;text-overflow:ellipsis}
@@ -251,6 +255,7 @@ details.more>div{display:flex;flex-direction:column;gap:12px}
 
 <script src="bf-data.js"></script>
 <script src="bf-train.js"></script>
+<script src="bf-forms.js"></script>
 <script src="app.js"></script>
 
 </body></html>
