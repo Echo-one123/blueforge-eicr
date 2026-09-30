@@ -63,7 +63,7 @@ function devShort(c){
 }
 
 /* ------------------------------------------------------------------ model */
-const DEFAULT_SETTINGS = { numPrefix:"BF", labelModuleMm:"18", counters:{}, officeEmail:"office@blueforge-engineering.co.uk", sendUrl:"", sendKey:"", autoSend:"Yes", userName:"", role:"Inspector", signOffName:"Adam Fyles", lastSync:0, company:"BlueForge Engineering", inspector:"Adam Fyles", position:"Owner / Inspector", address:"Llandudno, North Wales", phone:"", email:"", reg:"", mft:"", irSerial:"", loopSerial:"", elecSerial:"" };
+const DEFAULT_SETTINGS = { lock:"Off", lockAfter:"5", vatReg:"No", vatRate:"20", payTerms:"14", numPrefix:"BF", labelModuleMm:"18", counters:{}, officeEmail:"office@blueforge-engineering.co.uk", sendUrl:"", sendKey:"", autoSend:"Yes", userName:"", role:"Inspector", signOffName:"Adam Fyles", lastSync:0, company:"BlueForge Engineering", inspector:"Adam Fyles", position:"Owner / Inspector", address:"Llandudno, North Wales", phone:"", email:"", reg:"", mft:"", irSerial:"", loopSerial:"", elecSerial:"" };
 let settings = { ...DEFAULT_SETTINGS };
 
 function newCircuit(no){ return { id:uid(), no:String(no), desc:"", wtype:"A", ref:"C", pts:"", live:"", cpc:"", ctype:"Final", dev:"", rating:"", ka:"6", rcd:"", rcdType:"", len:"", ring:"N", r1:"", rn:"", r2:"", r12:"", R2:"", irv:"500", irll:"", irle:"", pol:"", zs:"", rcdt:"", rcdt5:"", rcdbtn:"", afdd:"", remarks:"" }; }
@@ -510,6 +510,7 @@ async function init(){
   }
   try { const r = JSON.parse(sessionStorage.getItem("bf-return") || "null"); sessionStorage.removeItem("bf-return"); if (r && jobs.some(x => x.id === r.jobId && !x.deleted)) view = {screen:"job", jobId:r.jobId, tab:r.tab, board:0, circ:null}; } catch(e){}
   render();
+  if (lockOn()) showLock();
   window.addEventListener("online", () => { updateStatus(); syncNow(); });
   window.addEventListener("offline", updateStatus);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") syncNow(); else if (persistTimer) { clearTimeout(persistTimer); writeNow(); } });
@@ -1096,6 +1097,278 @@ ${photosSectionHtml(job, false)}
 <footer>${esc(co.company || "BlueForge Engineering")} – PAT register ${esc(job.reportNo || "")} – ${esc(job.address || "")}</footer></body></html>`;
 }
 
+/* ================================================================== batch 4: app lock, quotes, invoices, customer copies */
+
+/* ---------------- money helpers */
+const money = v => "£" + (Math.round((num(v) || 0) * 100) / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+const DEFAULT_PRICES = [
+  {desc:"Replace damaged socket-outlet or switch", price:"45"},
+  {desc:"Fit blanking plates / blanks to consumer unit", price:"25"},
+  {desc:"Install or upgrade main protective bonding (per service)", price:"95"},
+  {desc:"Add 30 mA RCD protection – RCBO per circuit", price:"65"},
+  {desc:"Replace consumer unit (up to 10 ways) with EIC", price:"650"},
+  {desc:"Supplementary bonding in bathroom", price:"85"},
+  {desc:"Fault finding / further investigation (per hour)", price:"60"},
+  {desc:"Circuit chart and labelling", price:"30"},
+  {desc:"Earthing conductor upgrade", price:"120"},
+  {desc:"EICR – domestic (up to 10 circuits)", price:"150"},
+  {desc:"EIC certificate", price:"60"},
+  {desc:"Minor works certificate", price:"40"},
+  {desc:"PAT testing (per item)", price:"2.50"}
+];
+function priceList(){ if (!Array.isArray(settings.prices)) settings.prices = DEFAULT_PRICES.map(p => ({...p})); return settings.prices; }
+function suggestPrice(text){
+  const STOP = new Set(["and","the","for","per","with","fit","from","not","any","all","into","has","are","was","this","that","remedy","investigate","replace","install","add","upgrade"]);
+  const toks = t => (String(t || "").toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter(w => !STOP.has(w)).map(w => w.replace(/s$/, ""));
+  const words = new Set(toks(text));
+  let best = null, score = 0;
+  priceList().forEach(p => { const pw = new Set(toks(p.desc)); if (!pw.size) return; const hit = [...pw].filter(w => words.has(w)).length; const sc = hit + hit / pw.size; if (hit >= 2 && sc > score) { score = sc; best = p; } });
+  return best;
+}
+function totals(lines){
+  const sub = (lines || []).reduce((t, l) => t + (num(l.qty) ?? 1) * (num(l.price) || 0), 0);
+  const vat = settings.vatReg === "Yes" ? sub * (num(settings.vatRate) ?? 20) / 100 : 0;
+  return { sub, vat, total: sub + vat };
+}
+async function docNumber(code, year){
+  const pre = `${settings.numPrefix || "BF"}-${code}-${year}-`;
+  const all = jobs.flatMap(x => [x.reportNo, x.quote && x.quote.number, x.invoice && x.invoice.number]);
+  const floor = Math.max(0, ...all.map(n => String(n || "").startsWith(pre) ? parseInt(String(n).slice(pre.length), 10) || 0 : 0));
+  if (settings.sendUrl && navigator.onLine !== false) {
+    try { const o = await api("nextNumber", { type: code, year, prefix: settings.numPrefix || "BF", floor }); if (o.number) return o.number; } catch(e){}
+  }
+  settings.counters = settings.counters || {};
+  const k = code + ":" + year; settings.counters[k] = Math.max(settings.counters[k] || 0, floor) + 1; lsWrite();
+  return pre + String(settings.counters[k]).padStart(3, "0");
+}
+function lineEditor(bindBase, lines){
+  return `${lines.map((l, i) => `<div class="obs"><div class="row"><b style="font-family:var(--f-mono)">${i + 1}</b>${l.code ? `<span class="pill ${l.code === "C3" ? "none" : l.code === "FI" ? "check" : "fail"}">${esc(l.code)}</span>` : ""}<span class="spacer"></span><button class="btn ghost sm" data-act="delLine" data-base="${bindBase}" data-i="${i}">Remove</button></div>
+    ${field("Description", `${bindBase}.${i}.desc`, {area:true})}
+    <div class="grid2">${field("Qty", `${bindBase}.${i}.qty`, {num:true})}${field("Price each", `${bindBase}.${i}.price`, {num:true, unit:"£"})}</div>
+    ${l.hint ? `<div class="muted small">${esc(l.hint)}</div>` : ""}</div>`).join("")}
+    <div class="row"><button class="btn ghost sm" data-act="addLine" data-base="${bindBase}">+ Add line</button><button class="btn ghost sm" data-act="addFromPrices" data-base="${bindBase}">+ From price list</button></div>
+    ${view.pricePick === bindBase ? `<div class="codes-list">${priceList().map((p, i) => `<button class="card-link" data-act="pickPrice" data-base="${bindBase}" data-i="${i}"><div class="grow"><div class="t">${esc(p.desc)}</div></div><b>${esc(money(p.price))}</b></button>`).join("")}</div>` : ""}`;
+}
+function totalsHtml(lines){
+  const t = totals(lines);
+  return `<div class="auto" style="flex-direction:column;align-items:stretch;gap:2px;padding:10px 12px" data-derived="${""}">
+    <div class="row"><span>Subtotal</span><span class="spacer"></span><b>${money(t.sub)}</b></div>
+    ${settings.vatReg === "Yes" ? `<div class="row"><span>VAT ${esc(settings.vatRate || "20")}%</span><span class="spacer"></span><b>${money(t.vat)}</b></div>` : ""}
+    <div class="row"><span>Total</span><span class="spacer"></span><b style="font-size:18px">${money(t.total)}</b></div></div>`;
+}
+
+/* ---------------- quotes (EICR remedials) */
+function quoteCard(job){
+  if (typeOf(job) !== "EICR" || job.example) return "";
+  const q = job.quote;
+  const n = job.obs.filter(o => ["C1","C2","FI"].includes(o.code)).length;
+  if (!q) return n ? `<div class="card"><h2>Remedial quote</h2><div class="muted small">Turn the ${n} C1/C2/FI item${n === 1 ? "" : "s"} into a priced quote for the customer.</div><button class="btn sm" data-act="makeQuote">Create quote</button></div>` : "";
+  return `<div class="card"><h2>Remedial quote <span class="count">${esc(q.number || "")}</span></h2><div class="row">${pill(q.status === "Accepted" ? "pass" : q.status === "Declined" ? "fail" : q.status === "Sent" ? "check" : "none", q.status || "Draft")}<b>${money(totals(q.lines).total)}</b><span class="spacer"></span><button class="btn sm" data-act="openQuote">Open quote</button></div></div>`;
+}
+async function makeQuote(job, withC3){
+  const q = job.quote || { lines: [], status: "Draft", created: today(), valid: "30", notes: "" };
+  const have = new Set(q.lines.map(l => l.obsId));
+  job.obs.filter(o => (withC3 ? ["C1","C2","C3","FI"] : ["C1","C2","FI"]).includes(o.code) && !have.has(o.id)).forEach(o => {
+    const sp = suggestPrice(o.text);
+    q.lines.push({ obsId: o.id, code: o.code, desc: (o.code === "FI" ? "Investigate: " : "Remedy: ") + o.text + (o.loc ? ` (${o.loc})` : ""), qty: "1", price: sp ? sp.price : "", hint: sp ? `Price from your list: ${sp.desc}` : "No match in your price list – enter a price" });
+  });
+  job.quote = q; markDirty(job);
+  if (!q.number) { q.number = await docNumber("Q", today().slice(0, 4)); markDirty(job); }
+}
+function tabQuote(){
+  const job = j(); const q = job.quote;
+  if (!q) return `<div class="empty">No quote yet.</div>`;
+  return `<div class="card"><h2>Quote ${esc(q.number || "")}</h2>
+    ${chips("Status","job.quote.status",["Draft","Sent","Accepted","Declined"],{small:true})}
+    <div class="grid2">${field("Date","job.quote.created",{type:"date"})}${field("Valid for","job.quote.valid",{num:true,unit:"days"})}</div></div>
+  <div class="card"><h2>Work <span class="count">${q.lines.length} line${q.lines.length === 1 ? "" : "s"}</span></h2>${lineEditor("job.quote.lines", q.lines)}
+    ${job.obs.some(o => o.code === "C3") ? `<button class="btn ghost sm" data-act="addC3">+ Add the C3 items too</button>` : ""}</div>
+  <div class="card"><h2>Total</h2><div id="qtot">${totalsHtml(q.lines)}</div>${field("Notes for the customer","job.quote.notes",{area:true,ph:"e.g. Price includes certification. Access to loft required."})}</div>
+  <div class="card"><h2>Send</h2>
+    <div class="grid2">${field("Customer name","job.client.name")}${field("Customer email","job.client.email",{type:"email"})}</div>
+    <button class="btn block" data-act="sendQuote" ${settings.sendUrl ? "" : "disabled"}>Email quote to customer</button>
+    <div class="muted small">${settings.sendUrl ? `The office (${esc(settings.officeEmail)}) gets a copy.` : "Set up sync in ⚙ to email quotes – you can print it meanwhile."}${q.sentAt ? " Sent " + esc(agoText(q.sentAt)) + "." : ""}</div><div id="quotemsg"></div>
+    <button class="btn block ghost" data-act="printQuote">Print / save as PDF</button></div>
+  ${q.status === "Accepted" ? `<div class="card"><h2>Do the work</h2>${q.workJob && jobs.some(x => x.id === q.workJob && !x.deleted) ? `<button class="btn block" data-act="open" data-id="${esc(q.workJob)}">Open the remedial job</button>` : `<div class="muted small">Start the certificate for the remedial work – the quote lines become the work description.</div><div class="row"><button class="btn sm" data-act="quoteToJob" data-type="MW">Start Minor Works</button><button class="btn sm" data-act="quoteToJob" data-type="EIC">Start EIC</button></div>`}</div>` : ""}
+  <button class="btn ghost sm" data-act="backToReport">Back to report</button>`;
+}
+function docHtml(job, kind){
+  const co = job.company || settings, d = kind === "quote" ? job.quote : job.invoice, t = totals(d.lines), c = job.client || {};
+  const rows = d.lines.map((l, i) => `<tr><td>${i + 1}</td><td>${esc(l.desc)}</td><td style="text-align:right">${esc(l.qty || "1")}</td><td style="text-align:right">${money(l.price)}</td><td style="text-align:right">${money((num(l.qty) ?? 1) * (num(l.price) || 0))}</td></tr>`).join("");
+  const due = kind === "invoice" && d.date ? (() => { const x = new Date(d.date + "T12:00:00"); x.setDate(x.getDate() + (num(settings.payTerms) ?? 14)); return x.toISOString().slice(0, 10); })() : "";
+  const title = kind === "quote" ? "QUOTATION" : "INVOICE";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} ${esc(d.number || "")}</title>
+<style>${REPORT_CSS}
+.doc td,.doc th{border:1px solid #A6A6A6;padding:6px 8px}.doc th{background:#1B365D;color:#fff;text-align:left}.tot td{border:0;padding:3px 8px;text-align:right}.tot .big{font-size:15px;font-weight:bold;padding:4px 8px;text-align:right}.paid{color:#17663F;font-weight:bold;font-size:18px}</style></head><body>
+<div class="band"><b>${esc(co.company || "BlueForge Engineering")}</b><span>${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</span></div>
+<div class="sub">${title}</div>
+<table class="kv"><tbody><tr><th>${kind === "quote" ? "Quote" : "Invoice"} number</th><td>${esc(d.number || "")}</td><th>Date</th><td>${esc(ukDate(kind === "quote" ? d.created : d.date))}</td></tr>
+<tr><th>Customer</th><td>${esc(c.name || "")}<br>${esc(c.address || "")}</td><th>${kind === "quote" ? "Valid until" : "Payment due"}</th><td>${esc(kind === "quote" ? ukDate((() => { const x = new Date((d.created || today()) + "T12:00:00"); x.setDate(x.getDate() + (num(d.valid) ?? 30)); return x.toISOString().slice(0, 10); })()) : ukDate(due))}</td></tr>
+<tr><th>Installation address</th><td colspan="3">${esc(job.address || "")}</td></tr>
+${kind === "quote" && job.reportNo ? `<tr><th>Based on report</th><td colspan="3">EICR ${esc(job.reportNo)} dated ${esc(ukDate(job.inspDate))}</td></tr>` : ""}
+${kind === "invoice" && job.reportNo ? `<tr><th>Job reference</th><td colspan="3">${esc(TYPES[typeOf(job)])} ${esc(job.reportNo)}</td></tr>` : ""}</tbody></table>
+<table class="doc" style="margin-top:10px"><thead><tr><th>#</th><th>Description</th><th style="text-align:right">Qty</th><th style="text-align:right">Price</th><th style="text-align:right">Amount</th></tr></thead><tbody>${rows}</tbody></table>
+<table class="tot" style="margin-top:6px"><tr><td>Subtotal</td><td style="width:110px">${money(t.sub)}</td></tr>${settings.vatReg === "Yes" ? `<tr><td>VAT ${esc(settings.vatRate || "20")}%</td><td>${money(t.vat)}</td></tr>` : ""}<tr><td class="big">Total</td><td class="big">${money(t.total)}</td></tr></table>
+${d.notes ? `<h2>Notes</h2><p class="guide" style="font-size:11px">${esc(d.notes)}</p>` : ""}
+${kind === "quote" ? `<p class="guide" style="font-size:11px">To accept this quote, reply to this email or call ${esc(co.phone || "us")}. Work is carried out and certified to BS 7671.</p>` : ""}
+${kind === "invoice" ? (d.status === "Paid" ? `<p class="paid">PAID ${esc(ukDate(d.paidDate))} – thank you</p>` : `<h2>Payment</h2><table class="kv"><tbody>${settings.bankName ? `<tr><th>Account name</th><td>${esc(settings.bankName)}</td></tr>` : ""}${settings.sortCode ? `<tr><th>Sort code</th><td>${esc(settings.sortCode)}</td></tr>` : ""}${settings.accountNo ? `<tr><th>Account number</th><td>${esc(settings.accountNo)}</td></tr>` : ""}<tr><th>Reference</th><td>${esc(d.number || "")}</td></tr><tr><th>Due</th><td>${esc(ukDate(due))} (${esc(settings.payTerms || "14")} days)</td></tr></tbody></table>`) : ""}
+${settings.vatReg === "Yes" && settings.vatNo ? `<p class="guide">VAT registration number ${esc(settings.vatNo)}</p>` : ""}
+<footer>${esc(co.company || "BlueForge Engineering")} – ${title.toLowerCase()} ${esc(d.number || "")}</footer></body></html>`;
+}
+async function emailDoc(job, kind){
+  const d = kind === "quote" ? job.quote : job.invoice, c = job.client || {}, m = document.getElementById(kind + "msg");
+  if (!c.email) { if (m) m.innerHTML = `<div class="warnline">Add the customer's email first.</div>`; return; }
+  try {
+    if (m) m.innerHTML = `<div class="muted small">Sending…</div>`;
+    const name = `${kind === "quote" ? "Quote" : "Invoice"} ${d.number || ""}`.trim();
+    const t = totals(d.lines);
+    await api("send", { to: c.email, cc: settings.officeEmail, subject: `${name} – ${jobTitle(job)} – ${(job.company || settings).company}`,
+      body: `<p>Dear ${esc(c.name || "customer")},</p><p>Please find attached our ${kind === "quote" ? "quotation for the remedial work found during the electrical inspection" : "invoice"} for ${esc(job.address || "")} – total ${money(t.total)}.</p>${kind === "quote" ? "<p>To go ahead, just reply to this email.</p>" : ""}<p>Kind regards,<br>${esc(settings.userName || settings.inspector)}<br>${esc((job.company || settings).company)}${settings.phone ? "<br>" + esc(settings.phone) : ""}</p>`,
+      reportHtml: docHtml(job, kind), reportName: name + ".html", pdfName: name + ".pdf", folder: kind === "quote" ? "Quotes" : "Invoices" });
+    d.sentAt = Date.now(); if (kind === "quote" && (!d.status || d.status === "Draft")) d.status = "Sent"; markDirty(job);
+    if (m) m.innerHTML = `<div class="muted small">Sent to ${esc(c.email)}.</div>`;
+    rerender();
+  } catch(e){ if (m) m.innerHTML = `<div class="errline">Couldn't send: ${esc(e.message || e)}</div>`; }
+}
+function quoteToJob(job, type){
+  const q = job.quote;
+  const nj = newJobFrom(job, type);
+  nj.prevObs = [];
+  nj.work.desc = q.lines.map(l => l.desc.replace(/^(Remedy|Investigate): /, "")).join("\n");
+  nj.work.nature = type === "EIC" ? "Alteration" : "";
+  nj.fromQuote = { jobId: job.id, number: q.number };
+  nj.invoiceLines = q.lines.map(l => ({ desc: l.desc.replace(/^(Remedy|Investigate): /, ""), qty: l.qty, price: l.price }));
+  jobs.push(nj); q.workJob = nj.id; markDirty(job); markDirty(nj); assignNumber(nj);
+  return nj;
+}
+
+/* ---------------- invoices (any job) */
+function invoiceCard(job){
+  if (job.example || settings.role === "Tester") return "";
+  const v = job.invoice;
+  if (!v) return `<div class="card"><h2>Invoice</h2><div class="muted small">Raise an invoice for this job${job.fromQuote ? ` – lines come from quote ${esc(job.fromQuote.number || "")}` : ""}.</div><button class="btn sm" data-act="makeInvoice">Create invoice</button></div>`;
+  return `<div class="card"><h2>Invoice <span class="count">${esc(v.number || "")}</span></h2><div class="row">${pill(v.status === "Paid" ? "pass" : "check", v.status === "Paid" ? "Paid" : "Unpaid")}<b>${money(totals(v.lines).total)}</b><span class="spacer"></span><button class="btn sm" data-act="openInvoice">Open invoice</button></div></div>`;
+}
+async function makeInvoice(job){
+  const t = typeOf(job);
+  let lines = job.invoiceLines ? job.invoiceLines.map(l => ({...l})) : null;
+  if (!lines) {
+    const circuits = job.boards.reduce((n, b) => n + b.circuits.length, 0), items = job.pat ? job.pat.items.length : 0;
+    const desc = t === "PAT" ? `PAT testing – ${items} item${items === 1 ? "" : "s"}` : `${TYPE_LONG[t]} – ${jobTitle(job)}${t === "EICR" ? ` (${circuits} circuits)` : ""}`;
+    const sp = t === "PAT" ? priceList().find(p => /pat/i.test(p.desc)) : suggestPrice(TYPE_LONG[t] + " " + TYPES[t] + " certificate");
+    lines = [{ desc, qty: t === "PAT" ? String(items || 1) : "1", price: sp ? sp.price : "" }];
+  }
+  job.invoice = { lines, date: today(), status: "Unpaid", notes: "" };
+  markDirty(job);
+  job.invoice.number = await docNumber("INV", today().slice(0, 4)); markDirty(job);
+}
+function tabInvoice(){
+  const job = j(), v = job.invoice;
+  if (!v) return `<div class="empty">No invoice yet.</div>`;
+  return `<div class="card"><h2>Invoice ${esc(v.number || "")}</h2>
+    ${chips("Status","job.invoice.status",["Unpaid","Paid"])}
+    <div class="grid2">${field("Invoice date","job.invoice.date",{type:"date"})}${v.status === "Paid" ? field("Date paid","job.invoice.paidDate",{type:"date"}) : ""}</div></div>
+  <div class="card"><h2>Lines</h2>${lineEditor("job.invoice.lines", v.lines)}</div>
+  <div class="card"><h2>Total</h2><div id="itot">${totalsHtml(v.lines)}</div>${field("Notes","job.invoice.notes",{area:true})}
+    ${!settings.sortCode && !settings.accountNo ? `<div class="warnline">Add your bank details in ⚙ so they print on invoices.</div>` : ""}</div>
+  <div class="card"><h2>Send</h2>
+    <div class="grid2">${field("Customer name","job.client.name")}${field("Customer email","job.client.email",{type:"email"})}</div>
+    <button class="btn block" data-act="sendInvoice" ${settings.sendUrl ? "" : "disabled"}>Email invoice to customer</button>
+    <div class="muted small">${settings.sendUrl ? `The office gets a copy.` : "Set up sync in ⚙ to email invoices – you can print it meanwhile."}${v.sentAt ? " Sent " + esc(agoText(v.sentAt)) + "." : ""}</div><div id="invoicemsg"></div>
+    <button class="btn block ghost" data-act="printInvoice">Print / save as PDF</button></div>
+  <button class="btn ghost sm" data-act="backToFinish">Back</button>`;
+}
+function renderMoney(){
+  const qs = liveJobs().filter(x => x.quote).sort((a,b) => String(b.quote.created).localeCompare(String(a.quote.created)));
+  const inv = liveJobs().filter(x => x.invoice).sort((a,b) => String(b.invoice.date).localeCompare(String(a.invoice.date)));
+  const unpaid = inv.filter(x => x.invoice.status !== "Paid"), owed = unpaid.reduce((t, x) => t + totals(x.invoice.lines).total, 0);
+  const open = qs.filter(x => ["Draft","Sent"].includes(x.quote.status || "Draft")), pipe = open.reduce((t, x) => t + totals(x.quote.lines).total, 0);
+  const row = (x, kind) => { const d = x[kind]; const st = kind === "quote" ? (d.status || "Draft") : (d.status || "Unpaid");
+    return `<button class="card-link" data-act="openDoc" data-id="${esc(x.id)}" data-kind="${kind}"><div class="grow"><div class="t">${esc(jobTitle(x))}</div><div class="d">${esc(d.number || "")} · ${esc(ukDate(kind === "quote" ? d.created : d.date))}</div></div><div style="text-align:right"><b>${money(totals(d.lines).total)}</b><br>${pill(st === "Paid" || st === "Accepted" ? "pass" : st === "Declined" ? "fail" : st === "Draft" ? "none" : "check", st)}</div></button>`; };
+  return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Quotes &amp; invoices</h1></header>
+  <main><div class="codes" style="grid-template-columns:1fr 1fr"><div><b>${money(owed)}</b><span>owed (${unpaid.length} unpaid)</span></div><div><b>${money(pipe)}</b><span>in open quotes (${open.length})</span></div></div>
+    <div class="card"><h2>Invoices <span class="count">${inv.length}</span></h2>${inv.length ? inv.map(x => row(x, "invoice")).join("") : `<div class="muted small">None yet – create one from any job's ${"Report / Certify"} tab.</div>`}</div>
+    <div class="card"><h2>Quotes <span class="count">${qs.length}</span></h2>${qs.length ? qs.map(x => row(x, "quote")).join("") : `<div class="muted small">None yet – create one from an EICR's Report tab.</div>`}</div></main>`;
+}
+
+/* ---------------- customer copy of the certificate (per job, off unless ticked) */
+function customerCopyBlock(job){
+  if (job.example || settings.role === "Tester") return "";
+  return `${chips("Also email this " + (typeOf(job) === "EICR" ? "report" : typeOf(job) === "PAT" ? "register" : "certificate") + " to the customer","job.emailCustomer",["Yes","No"],{small:true})}
+    ${job.emailCustomer === "Yes" ? field("Customer email","job.client.email",{type:"email",hint: job.client.email ? "" : "Needed to send the customer a copy"}) : ""}
+    ${job.customerSentAt ? `<div class="muted small">Customer copy sent ${esc(agoText(job.customerSentAt))}.</div>` : ""}`;
+}
+async function sendCustomerCopy(job){
+  const c = job.client || {}, t = typeOf(job), co = job.company || settings;
+  const noun = t === "EICR" ? "Electrical Installation Condition Report" : TYPE_LONG[t];
+  await api("send", { to: c.email, subject: `Your ${noun} – ${jobTitle(job)}`,
+    body: `<p>Dear ${esc(c.name || "customer")},</p><p>Please find attached your ${esc(noun)} for ${esc(job.address || "")}, dated ${esc(ukDate(job.inspDate))}${t === "EICR" ? ` – overall assessment: <b>${esc(outcomeText(job))}</b>` : ""}.</p><p>Please keep it safe – you'll need it if you sell the property, for insurance, or when further work is done.</p><p>Kind regards,<br>${esc(job.inspector || settings.inspector)}<br>${esc(co.company)}${co.phone ? "<br>" + esc(co.phone) : ""}</p>`,
+    reportHtml: exportHtml(job), reportName: fileName(job, "html"), pdfName: fileName(job, "pdf"), noSave: true });
+  job.customerSentAt = Date.now();
+}
+
+/* ---------------- app lock: PIN, plus fingerprint / face where the device supports it */
+let locked = false, lastHidden = 0, pinEntry = "";
+async function sha(s){ const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)); return Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2, "0")).join(""); }
+const lockOn = () => settings.lock === "On" && !!settings.pinHash;
+const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64u = s => { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; return Uint8Array.from(atob(s), c => c.charCodeAt(0)); };
+async function bioAvailable(){ try { return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch(e){ return false; } }
+async function bioRegister(){
+  const cred = await navigator.credentials.create({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: "BlueForge Certificates" },
+    user: { id: crypto.getRandomValues(new Uint8Array(16)), name: settings.userName || "BlueForge user", displayName: settings.userName || "BlueForge user" },
+    pubKeyCredParams: [{type:"public-key", alg:-7}, {type:"public-key", alg:-257}], authenticatorSelection: { authenticatorAttachment:"platform", userVerification:"required", residentKey:"discouraged" }, timeout: 60000 } });
+  settings.bioId = b64u(cred.rawId); lsWrite();
+}
+async function bioUnlock(){
+  await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type:"public-key", id: unb64u(settings.bioId) }], userVerification: "required", timeout: 60000 } });
+  unlock();
+}
+function showLock(){
+  if (!lockOn()) return;
+  locked = true; pinEntry = "";
+  let l = document.getElementById("lock");
+  if (!l) { l = document.createElement("div"); l.id = "lock"; l.className = "lock"; document.body.appendChild(l); }
+  const keys = ["1","2","3","4","5","6","7","8","9","","0","⌫"];
+  l.innerHTML = `<div class="lockin"><div class="brandmark">BLUEFORGE</div><h2>Enter your PIN</h2><div class="dots" id="pindots">${"○".repeat(settings.pinLen || 4)}</div><div id="pinmsg" class="small"></div>
+    <div class="keypad">${keys.map(k => k ? `<button class="key" data-pin="${k}">${k}</button>` : `<span></span>`).join("")}</div>
+    ${settings.bioId ? `<button class="btn ghost" data-act="bio" style="color:#fff;border-color:rgba(255,255,255,.5)">Use fingerprint / face</button>` : ""}
+    <button class="linkbtn" data-act="forgotPin">Forgot PIN?</button><div id="forgot"></div></div>`;
+  l.hidden = false;
+}
+function unlock(){ locked = false; const l = document.getElementById("lock"); if (l) { l.hidden = true; l.innerHTML = ""; } }
+document.addEventListener("click", async e => {
+  const k = e.target.closest("[data-pin]");
+  if (k && locked) {
+    if (k.dataset.pin === "⌫") pinEntry = pinEntry.slice(0, -1); else pinEntry += k.dataset.pin;
+    const len = settings.pinLen || 4, d = document.getElementById("pindots");
+    if (d) d.textContent = "●".repeat(pinEntry.length) + "○".repeat(Math.max(0, len - pinEntry.length));
+    if (pinEntry.length >= len) {
+      const ok = (await sha(settings.pinSalt + pinEntry)) === settings.pinHash;
+      if (ok) unlock(); else { pinEntry = ""; const m = document.getElementById("pinmsg"); if (m) m.textContent = "Wrong PIN – try again"; if (d) d.textContent = "○".repeat(len); }
+    }
+    return;
+  }
+  const a = e.target.closest("[data-act]"); if (!a) return;
+  if (a.dataset.act === "bio" && locked) { try { await bioUnlock(); } catch(err){ const m = document.getElementById("pinmsg"); if (m) m.textContent = "Fingerprint didn't work – use your PIN"; } }
+  if (a.dataset.act === "forgotPin" && locked) { const f = document.getElementById("forgot"); if (f) f.innerHTML = `<div class="small" style="margin-top:8px">Resetting clears everything on this device. Jobs that have synced to Google Drive come back once you reconnect with your connection code.</div><button class="btn danger sm" data-act="wipeDevice" style="margin-top:8px;background:#fff">Reset this device</button>`; }
+  if (a.dataset.act === "wipeDevice" && locked) { try { indexedDB.deleteDatabase(IDB_NAME); localStorage.clear(); sessionStorage.clear(); } catch(err){} setTimeout(() => location.reload(), 300); }
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") lastHidden = Date.now();
+  else if (lockOn() && !locked && lastHidden && Date.now() - lastHidden > (num(settings.lockAfter) ?? 5) * 60000) showLock();
+});
+function lockCard(){
+  return `<div class="card"><h2>App lock</h2><div class="muted small">Asks for a PIN (or fingerprint / face) when the app opens and after it's been in the background. Protects customer details if the phone is lost.</div>
+    ${settings.pinHash ? `<div class="row">${pill(settings.lock === "On" ? "pass" : "none", settings.lock === "On" ? "Lock on" : "Lock off")}${settings.bioId ? pill("pass","Fingerprint / face set up") : ""}</div>
+      ${chips("Lock","settings.lock",["On","Off"])}
+      ${chips("Lock again after (minutes in background)","settings.lockAfter",["1","5","15","30"],{small:true})}
+      <div class="row">${settings.bioId ? `<button class="btn ghost sm" data-act="bioOff">Turn off fingerprint</button>` : `<button class="btn ghost sm" data-act="bioSetup">Set up fingerprint / face</button>`}<button class="btn ghost sm" data-act="changePin">Change PIN</button></div>` : ""}
+    ${!settings.pinHash || view.changePin ? `<div class="grid2"><label class="field" for="newpin"><span>New PIN (4–6 digits)</span><input id="newpin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" class="num"></label><label class="field" for="newpin2"><span>Repeat PIN</span><input id="newpin2" type="password" inputmode="numeric" autocomplete="off" maxlength="6" class="num"></label></div>
+      <button class="btn sm" data-act="savePin">Save PIN and turn lock on</button>` : ""}
+    <div id="lockmsg"></div></div>`;
+}
+
 /* ------------------------------------------------------------------ sending to the office */
 let sending = false;
 function jobTitle(job){ return (job.address || job.client.name || "Untitled job").split("\n")[0]; }
@@ -1128,11 +1401,15 @@ async function sendJob(job){
 }
 async function processQueue(){
   if (sending || !settings.sendUrl || navigator.onLine === false) return;
-  const queue = liveJobs().filter(x => x.sendQueued && (!x.sendDevice || x.sendDevice === settings.deviceId));
+  const queue = liveJobs().filter(x => (x.sendQueued || x.customerPending) && (!x.sendDevice || x.sendDevice === settings.deviceId));
   if (!queue.length) return;
   sending = true;
   for (const job of queue){
-    try { await sendJob(job); job.sendQueued = false; job.sentAt = Date.now(); job.sendError = ""; job.updated = Date.now(); }
+    try {
+      if (job.sendQueued) { await sendJob(job); job.sendQueued = false; job.sentAt = Date.now(); }
+      if (job.customerPending) { await sendCustomerCopy(job); job.customerPending = false; }
+      job.sendError = ""; job.updated = Date.now();
+    }
     catch(e){ job.sendError = String(e.message || e); }
     lsWrite();
   }
@@ -1154,6 +1431,9 @@ async function finishAndSend(){
   job.finishedAt = Date.now();
   const auto = settings.sendUrl && settings.autoSend !== "No";
   if (auto) { job.sendQueued = true; job.sendError = ""; job.sendDevice = settings.deviceId; }
+  job.customerPending = !!(settings.sendUrl && job.emailCustomer === "Yes" && job.client && job.client.email);
+  if (job.customerPending) job.sendDevice = settings.deviceId;
+  if (job.emailCustomer === "Yes" && !settings.sendUrl) toast("Sync isn't set up, so the customer copy can't be emailed – forward it from your email app.");
   if (!job.issueDate) job.issueDate = today();
   markDirty(job); rerender();
   if (IOS) { processQueue(); await shareFiles(copies, reportSubject(job)); return; }
@@ -1258,12 +1538,14 @@ function doPost(e) {
       try { pdf = Utilities.newBlob(d.reportHtml, "text/html", "report.html").getAs("application/pdf").setName(d.pdfName); files.push(pdf); } catch (err) {}
       var html = Utilities.newBlob(d.reportHtml, "text/html", d.reportName);
       files.push(html);
-      files.push(Utilities.newBlob(d.backup, "application/json", d.backupName));
+      if (d.backup) files.push(Utilities.newBlob(d.backup, "application/json", d.backupName));
       var mail = {to: d.to || OFFICE, subject: d.subject, htmlBody: d.body, attachments: files, name: "BlueForge EICR"};
       if (d.cc) mail.cc = d.cc;
       MailApp.sendEmail(mail);
-      var certs = sub_("Certificates");
-      if (pdf) replace_(certs, d.pdfName, pdf); else replace_(certs, d.reportName, html);
+      if (!d.noSave) {
+        var certs = sub_(d.folder || "Certificates");
+        if (pdf) replace_(certs, d.pdfName, pdf); else replace_(certs, d.reportName, html);
+      }
       return reply({ok: true});
     }
     return reply({ok: false, error: "Unknown action"});
@@ -1383,6 +1665,7 @@ function render(){
   else if (view.screen === "book") html = renderBook();
   else if (view.screen === "codes") html = renderCodes();
   else if (view.screen === "due") html = renderDue();
+  else if (view.screen === "money") html = renderMoney();
   else if (view.screen === "job") { if (curJob() && !curJob().deleted) html = renderJob(); else { view = {screen:"home", tab:"job", board:0, circ:null}; html = renderHome(); } }
   app.innerHTML = html;
   renderTabs();
@@ -1431,6 +1714,7 @@ function renderHome(){
     <div class="tiles">
       <button class="tile" data-act="book"><b>Handbook</b><span>Tables, test methods, calculators</span></button>
       <button class="tile" data-act="codes"><b>Coding guide</b><span>Search C1 · C2 · C3 · FI</span></button>
+      <button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>
       <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} re-inspection${dueList().length === 1 ? "" : "s"} to chase</span></button>
     </div>
     ${ready ? `<div class="warnline">${ready} job${ready === 1 ? "" : "s"} ready for your sign-off.</div>` : ""}
@@ -1491,6 +1775,17 @@ function renderSettings(){
       ${field("Registration / scheme no.","settings.reg",{ph:"Leave blank if not registered"})}
       <div class="grid2">${field("Certificate number prefix","settings.numPrefix",{ph:"BF",hint:"Numbers look like BF-EICR-2026-001"})}${field("Breaker width for labels","settings.labelModuleMm",{num:true,unit:"mm",ph:"18"})}</div>
     </div>
+    ${lockCard()}
+    <div class="card"><h2>Prices</h2><div class="muted small">Used to price remedial quotes and invoices. These are examples – change them to your own.</div>
+      ${priceList().map((p, i) => `<div class="row" style="align-items:flex-end;flex-wrap:nowrap">${field("Item", "settings.prices." + i + ".desc")}<div style="width:110px;flex:none">${field("Price", "settings.prices." + i + ".price", {num:true, unit:"£"})}</div><button class="btn ghost sm" data-act="delPrice" data-i="${i}" aria-label="Remove">✕</button></div>`).join("")}
+      <button class="btn ghost sm" data-act="addPrice">+ Add price</button></div>
+    <div class="card"><h2>Invoicing</h2>
+      ${chips("VAT registered","settings.vatReg",["Yes","No"])}
+      ${settings.vatReg === "Yes" ? `<div class="grid2">${field("VAT number","settings.vatNo")}${field("VAT rate","settings.vatRate",{num:true,unit:"%",ph:"20"})}</div>` : ""}
+      ${field("Payment terms","settings.payTerms",{num:true,unit:"days",ph:"14"})}
+      ${field("Bank account name","settings.bankName")}
+      <div class="grid2">${field("Sort code","settings.sortCode",{ph:"00-00-00"})}${field("Account number","settings.accountNo",{num:true})}</div>
+      <div class="muted small">Printed on invoices. Kept on this device only – each device needs them entered.</div></div>
     <div class="card"><h2>Test instruments</h2><div class="muted small">Filled in automatically on each new board.</div>
       ${field("Multifunction tester (make / serial)","settings.mft")}${field("Insulation resistance tester serial","settings.irSerial",{ph:"e.g. As MFT"})}
       ${field("Continuity / loop / RCD tester serial","settings.loopSerial",{ph:"e.g. As MFT"})}${field("Earth electrode tester serial","settings.elecSerial")}
@@ -1514,11 +1809,11 @@ const TABS = {
 function renderJob(){
   const job = curJob();
   const t = typeOf(job);
-  if (!TABS[t].some(x => x[0] === view.tab) && !(view.tab === "danger" && t === "EICR")) view.tab = "job";
+  if (!TABS[t].some(x => x[0] === view.tab) && !(["danger","quote"].includes(view.tab) && t === "EICR") && view.tab !== "invoice") view.tab = "job";
   if (view.tab === "circuits" && curCirc()) return renderCircuit();
   if (view.tab === "pat" && view.patItem && job.pat && job.pat.items.some(x => x.id === view.patItem)) return renderPatItem();
   loadJobPhotos(job);
-  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
+  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
   return `<header class="top"><button class="iconbtn" data-act="home" aria-label="All jobs">←</button><h1>${esc(jobTitle(job) === "Untitled job" ? "New " + TYPES[t] : jobTitle(job))}<span class="sub">${job.example ? "Example – not saved" : esc(TYPES[t]) + (job.reportNo ? " · " + esc(job.reportNo) : "")}</span></h1></header>
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example report – edits aren't saved</div>` : statusHtml()}
   ${job.handoff && !job.sig && settings.role !== "Tester" && view.tab === "job" ? `<main style="padding-bottom:0"><div class="warnline">Tested by ${esc(job.handoff.by)} and sent for sign-off ${esc(agoText(job.handoff.at))}. Check it through, then sign on the ${t === "EICR" ? "Report" : "Certify"} tab.</div></main>` : ""}
@@ -1631,11 +1926,12 @@ function finishCard(job){
        <div class="row small"><span class="muted">To ${esc(settings.officeEmail)}${settings.sendUrl ? " and your Google Drive" : ""}. ${IOS ? (settings.sendUrl ? "Choose <b>Save to Files</b> to keep a copy on the phone." : "Choose <b>Mail</b> to send it to the office, or <b>Save to Files</b> to keep a copy.") : "A copy is also saved to Downloads."}</span>${sendStatus(job)}</div>
        ${job.sendError && job.sendQueued ? `<div class="warnline">Not sent yet: ${esc(job.sendError)}. It will keep trying.</div>` : ""}
        `;
-  return `<div class="card"><h2>Finished ${noun}</h2>${main}
+  return `<div class="card"><h2>Finished ${noun}</h2>${customerCopyBlock(job)}${main}
     <button class="btn block ghost" data-act="print">Print / save as PDF</button>
     <div class="muted small">${IOS ? `Shows the full ${noun}. Tap <b>Print / PDF</b>, then Share › <b>Save to Files</b> for a PDF. <b>Back to app</b> returns here.` : `Opens the full ${noun} laid out for A4. In the print screen choose <b>Save as PDF</b>.`}</div>
     <button class="btn block ghost" data-act="export">Download ${noun} file</button><div id="exportmsg"></div>
   </div>
+  ${invoiceCard(job)}
   <div class="card"><h2>Delete</h2>${view.confirmDel === "job" ? `<div class="row"><span class="small">Delete this whole ${noun} from every synced device? This can't be undone.</span><button class="btn danger sm" data-act="delJob">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="job">Delete this ${noun}</button>`}</div>`;
 }
 
@@ -1867,6 +2163,7 @@ function tabReport(){
   return `${banner}
   <div class="codes">${["C1","C2","C3","FI"].map(k => `<div><b>${s.counts[k]}</b><span>${k}</span></div>`).join("")}</div>
   ${dangerCard(job)}
+  ${quoteCard(job)}
   ${prevObsCard(job)}
   ${warns.length ? `<div class="card"><h2>To sort out</h2>${warns.join("")}</div>` : ""}
   <div class="card"><h2>Observations <span class="count">${job.obs.length}</span></h2>
@@ -1930,6 +2227,7 @@ document.addEventListener("input", e => {
   setPath(obj, path, el.value);
   if (root === "job" && path === "reportNo") obj.numPending = false;
   if (root === "settings" && (path === "sendUrl" || path === "sendKey")) scheduleSync(1500);
+  if (path.includes(".lines.")) { const q = j(); const qt = document.getElementById("qtot"), it = document.getElementById("itot"); if (qt && q.quote) qt.innerHTML = totalsHtml(q.quote.lines); if (it && q.invoice) it.innerHTML = totalsHtml(q.invoice.lines); }
   if (root === "settings") flush();
   else markDirty(j());
   if (el.hasAttribute("data-rerender")) { if (path === "dev") { const c = curCirc(); if (c && ZS[c.dev] && !ZS[c.dev][+c.rating]) c.rating = ""; } rerender(); }
@@ -1976,6 +2274,32 @@ document.addEventListener("click", e => {
       jb.updated = Date.now(); lsWrite(); scheduleSync(6000);
       view = {screen:"job", jobId:cf.jobId, tab:cf.tab, board:0, circ:null}; render(); break; }
     case "syncNow": syncNow(); break;
+    case "money": view = {screen:"money"}; render(); break;
+    case "makeQuote": makeQuote(job, false).then(() => { view.tab = "quote"; render(); }); break;
+    case "openQuote": view.tab = "quote"; render(); break;
+    case "addC3": makeQuote(job, true).then(rerender); break;
+    case "sendQuote": emailDoc(job, "quote"); break;
+    case "printQuote": printHtml(docHtml(job, "quote"), "quote"); break;
+    case "quoteToJob": { job.quote.status = "Accepted"; const nj = quoteToJob(job, a.dataset.type); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); toast(`${TYPES[a.dataset.type]} started – the quote lines are the work description`); break; }
+    case "makeInvoice": makeInvoice(job).then(() => { view.tab = "invoice"; render(); }); break;
+    case "openInvoice": view.tab = "invoice"; render(); break;
+    case "sendInvoice": emailDoc(job, "invoice"); break;
+    case "printInvoice": printHtml(docHtml(job, "invoice"), "invoice"); break;
+    case "backToFinish": view.tab = TABS[typeOf(job)].some(x => x[0] === "report") ? "report" : "cert"; render(); break;
+    case "openDoc": view = {screen:"job", jobId:a.dataset.id, tab:a.dataset.kind, board:0, circ:null}; render(); break;
+    case "addLine": { const arr = getPath(roots().job, a.dataset.base.split(".").slice(1).join(".")); arr.push({desc:"", qty:"1", price:""}); markDirty(job); rerender(); break; }
+    case "delLine": { const arr = getPath(roots().job, a.dataset.base.split(".").slice(1).join(".")); arr.splice(+a.dataset.i, 1); markDirty(job); rerender(); break; }
+    case "addFromPrices": view.pricePick = view.pricePick === a.dataset.base ? null : a.dataset.base; rerender(); break;
+    case "pickPrice": { const arr = getPath(roots().job, a.dataset.base.split(".").slice(1).join(".")); const p = priceList()[+a.dataset.i]; arr.push({desc:p.desc, qty:"1", price:p.price}); view.pricePick = null; markDirty(job); rerender(); break; }
+    case "addPrice": priceList().push({desc:"", price:""}); lsWrite(); rerender(); break;
+    case "delPrice": priceList().splice(+a.dataset.i, 1); lsWrite(); rerender(); break;
+    case "changePin": view.changePin = true; rerender(); break;
+    case "savePin": { const p1 = document.getElementById("newpin").value, p2 = document.getElementById("newpin2").value, m = document.getElementById("lockmsg");
+      if (!/^\d{4,6}$/.test(p1)) { m.innerHTML = `<div class="warnline">Use 4 to 6 digits.</div>`; break; }
+      if (p1 !== p2) { m.innerHTML = `<div class="warnline">The two PINs don't match.</div>`; break; }
+      settings.pinSalt = uid(); sha(settings.pinSalt + p1).then(h => { settings.pinHash = h; settings.pinLen = p1.length; settings.lock = "On"; view.changePin = false; lsWrite(); rerender(); toast("PIN saved – the app will ask for it next time it opens"); }); break; }
+    case "bioSetup": bioAvailable().then(async ok => { if (!ok) { toast("This device can't do fingerprint / face unlock from the app – use your PIN."); return; } try { await bioRegister(); rerender(); toast("Fingerprint / face unlock set up"); } catch(err){ toast("Couldn't set up fingerprint / face: " + (err.message || err)); } }); break;
+    case "bioOff": settings.bioId = ""; lsWrite(); rerender(); break;
     case "newFrom": { const nj = newJobFrom(job, a.dataset.type); jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); toast(`New ${TYPES[a.dataset.type]} started from this job`); break; }
     case "copyFrom": { const src = jobs.find(x => x.id === a.dataset.id); if (!src) break; copyFrom(job, src); markDirty(job); rerender(); toast("Copied – check everything and re-test"); break; }
     case "prevObs": { const o = job.prevObs[+a.dataset.i]; if (!o) break; job.obs.push({id:uid(), text:o.text, loc:o.loc || "", reg:o.reg || "", code:o.code || "", src:"prev", photos:[]}); o.added = true; markDirty(job); rerender(); break; }
