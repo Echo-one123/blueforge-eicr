@@ -2640,22 +2640,26 @@ function renderHome(){
       ${Object.entries(FORMS).map(([k, f]) => `<button class="card-link" data-act="newType" data-type="${esc(k)}"><div class="grow"><div class="t">${esc(f.name)}</div><div class="d">${esc(f.long)} · ${esc(f.std || "")}</div></div></button>`).join("")}
       <button class="btn ghost sm" data-act="chooserOff">Cancel</button></div>`
       : `<button class="btn block" data-act="chooser">+ New</button>`}
-    <div class="tiles">
-      <button class="tile" data-act="book"><b>Handbook</b><span>Tables, test methods, calculators</span></button>
-      <button class="tile" data-act="codes"><b>Coding guide</b><span>Search C1 · C2 · C3 · FI</span></button>
-      <button class="tile" data-act="ask"><b>Ask the regs</b><span>AI answers with reg numbers</span></button>
-      <button class="tile" data-act="train"><b>Training</b><span>EWA · AM2E · 2391 practice</span></button>
-      <button class="tile" data-act="customers"><b>Customers</b><span>Contacts, addresses, job history</span></button>
-      <button class="tile" data-act="nvq"><b>NVQ portfolio</b><span>Log evidence as you work</span></button>
-      ${billingOk() ? "" : "<!--"}<button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>${billingOk() ? "" : "-->"}
-      <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} re-inspection${dueList().length === 1 ? "" : "s"} to chase</span></button>
-    </div>
     ${ready ? `<div class="warnline">${ready} job${ready === 1 ? "" : "s"} ready for your sign-off.</div>` : ""}
+    <section class="hgrp"><h3>On site</h3><div class="tiles t3">
+      <button class="tile" data-act="book"><b>Handbook</b><span>Tables, tests, calculators</span></button>
+      <button class="tile" data-act="codes"><b>Coding guide</b><span>C1 · C2 · C3 · FI</span></button>
+      <button class="tile" data-act="ask"><b>Ask the regs</b><span>AI, with reg numbers</span></button>
+    </div></section>
     <div class="card"><h2>Your jobs <span class="count">${liveJobs().length}</span></h2>
       ${liveJobs().length > 3 ? `<label class="field" for="homeq"><span>Search</span><input id="homeq" type="search" data-local="homeQ" value="${esc(view.homeQ || "")}" placeholder="Address, client, number…" autocomplete="off"></label>` : ""}
       <div id="homelist">${homeList()}</div>
     </div>
-    <div class="card"><h2>Example</h2>${jobCard(EX || (EX = exampleJob()))}<div class="muted small">A filled-in EICR on a shop board, so you can see the checks working. Changes to the example aren't saved.</div></div>
+    <section class="hgrp"><h3>Business</h3><div class="tiles t3" style="grid-template-columns:repeat(${billingOk() ? 3 : 2},minmax(0,1fr))">
+      <button class="tile" data-act="customers"><b>Customers</b><span>Contacts &amp; history</span></button>
+      ${billingOk() ? `<button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>` : ""}
+      <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} to chase</span></button>
+    </div></section>
+    <section class="hgrp"><h3>Learn</h3><div class="tiles t3" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+      <button class="tile" data-act="train"><b>Training</b><span>EWA · AM2E · 2391</span></button>
+      <button class="tile" data-act="nvq"><b>NVQ portfolio</b><span>Log evidence</span></button>
+    </div></section>
+    <details class="more card exbox"${liveJobs().length < 3 ? " open" : ""}><summary>Example report</summary><div>${jobCard(EX || (EX = exampleJob()))}<div class="muted small">A filled-in EICR on a shop board, so you can see the checks working. Changes to the example aren't saved.</div></div></details>
   </main>`;
 }
 
