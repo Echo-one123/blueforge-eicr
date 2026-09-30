@@ -490,14 +490,31 @@ function statusHtml(){
   return `<div class="status ${cls}" id="savestate" role="status"><span class="dot"></span><span style="min-width:0">${esc(txt + sync)}</span></div>`;
 }
 
+const LOGOS = { bf: null, inaec: null };
+async function loadLogos(){
+  const get = async f => { try { const r = await fetch(f); if (!r.ok) return null; const b = await r.blob(); if (!/^image\//.test(b.type)) return null;
+    return await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => res(null); fr.readAsDataURL(b); }); } catch(e){ return null; } };
+  [LOGOS.bf, LOGOS.inaec] = await Promise.all([get("logo-blueforge.png"), get("logo-inaec.png")]);
+  const mk = await get("logo-mark.png"); if (!mk) LOGOS.bf = null;
+  if (LOGOS.bf) document.documentElement.classList.add("has-logo");
+}
+function hideSplash(){ const sp = document.getElementById("splash"); if (!sp) return; const wait = Math.max(0, 700 - (Date.now() - (window.__bfStart || 0))); setTimeout(() => { sp.classList.add("gone"); setTimeout(() => sp.remove(), 450); }, wait); }
+// Company band at the top of every document. Certificates (not quotes/invoices) also carry the INAEC Independent Contractor logo.
+function band(co, cert){
+  const bf = LOGOS.bf ? `<img class="lg" src="${LOGOS.bf}" alt="">` : "";
+  const ic = cert && LOGOS.inaec ? `<img class="ic" src="${LOGOS.inaec}" alt="INAEC Independent Contractor">` : "";
+  return `<div class="band${bf || ic ? " logos" : ""}">${bf}<div class="bt"><b>${esc(co.company || "BlueForge Engineering")}</b><span>${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</span></div>${ic}</div>`;
+}
 async function init(){
+  window.__bfStart = window.__bfStart || Date.now();
   idb = await idbOpen();
+  await loadLogos();
   let st = await idbGet("state");
   if (!st) { const ls = lsRead(); if (ls && (ls.jobs || ls.settings)) st = ls; }
   if (st && st.settings) settings = {...DEFAULT_SETTINGS, ...st.settings};
   jobs = st && Array.isArray(st.jobs) ? st.jobs.map(normaliseJob) : [];
   if (!settings.deviceId) settings.deviceId = uid();
-  if (!settings.sendKey) settings.sendKey = "bf-" + Array.from({length:3}, () => Math.random().toString(36).slice(2,10)).join("");
+  if (!settings.sendKey) settings.sendKey = "bf-" + Array.from(crypto.getRandomValues(new Uint8Array(18)), x => "abcdefghijklmnopqrstuvwxyz0123456789"[x % 36]).join("");
   writeNow();
   await initPhotoQueue();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e){}
@@ -509,7 +526,7 @@ async function init(){
     } catch(e){}
   }
   try { const r = JSON.parse(sessionStorage.getItem("bf-return") || "null"); sessionStorage.removeItem("bf-return"); if (r && jobs.some(x => x.id === r.jobId && !x.deleted)) view = {screen:"job", jobId:r.jobId, tab:r.tab, board:0, circ:null}; } catch(e){}
-  render();
+  render(); hideSplash();
   if (lockOn()) showLock();
   window.addEventListener("online", () => { updateStatus(); syncNow(); });
   window.addEventListener("offline", updateStatus);
@@ -943,7 +960,7 @@ function dangerHtml(job){
 <style>@page{size:A4;margin:14mm}body{font-family:Arial,sans-serif;color:#0F1B2D;margin:0;padding:14px;font-size:13px}.band{background:#B42318;color:#fff;padding:12px 14px}.band b{display:block;font-size:22px;letter-spacing:.05em}
 table{border-collapse:collapse;width:100%;margin-top:10px}th,td{border:1px solid #999;padding:6px;text-align:left;vertical-align:top}th{background:#FDE2DF;width:28%}h2{font-size:14px;margin:16px 0 4px}.sig img{max-height:60px}</style></head><body>
 <div class="band"><b>DANGER NOTICE – C1</b>Electrical installation: danger present, immediate action required</div>
-<p>${esc(co.company || "BlueForge Engineering")} · ${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</p>
+<p>${LOGOS.bf ? `<img src="${LOGOS.bf}" alt="" style="height:44px;vertical-align:middle;margin-right:8px;background:#fff">` : ""}${esc(co.company || "BlueForge Engineering")} · ${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</p>
 <table><tr><th>Installation address</th><td>${esc(job.address)}</td></tr><tr><th>Report reference</th><td>${esc(job.reportNo || "")}</td></tr><tr><th>Date of inspection</th><td>${esc(ukDate(job.inspDate))}</td></tr><tr><th>Inspector</th><td>${esc(job.inspector)}</td></tr></table>
 <h2>Dangerous conditions found</h2><table>${c1Obs(job).map((o, i) => `<tr><th>C1 – ${i + 1}${o.loc ? "<br>" + esc(o.loc) : ""}</th><td>${esc(o.text)}</td></tr>`).join("")}</table>
 <h2>Action taken</h2><table><tr><th>Action</th><td>${esc(d.action || "")}</td></tr><tr><th>Details</th><td>${esc(d.details || "")}</td></tr></table>
@@ -1089,7 +1106,7 @@ function exportPat(job){
   const co = job.company || settings, s = patSummary(job), items = (job.pat && job.pat.items) || [];
   const rows = items.map(it => { const r = calcPat(job, it); return `<tr class="${r.result}"><td>${esc(it.no)}</td><td>${esc(it.desc)}</td><td>${esc(it.location)}</td><td>${esc(it.cls)}</td><td>${esc(it.kind)}</td><td>${esc(it.fuse)}</td><td>${esc(it.visual)}</td><td>${esc(it.rpe)}</td><td>${esc(it.ir)}</td><td>${esc(it.leak)}</td><td>${esc(it.pol)}</td><td>${{pass:"PASS",fail:"FAIL",check:"CHECK",none:""}[r.result]}</td><td>${esc(ukDate(r.next))}</td><td>${esc(it.notes)}</td></tr>`; }).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PAT register – ${esc(jobTitle(job))}</title><style>${REPORT_CSS}</style></head><body>
-<div class="band"><b>${esc(co.company || "BlueForge Engineering")}</b><span>${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</span></div>
+${band(co, true)}
 <div class="sub">Portable Appliance Test Register – in-service inspection and testing of electrical equipment</div>
 <table class="kv"><tbody><tr><th>Register number</th><td>${esc(job.reportNo)}</td><th>Test date</th><td>${esc(ukDate(job.inspDate))}</td></tr><tr><th>Client</th><td>${esc(job.client.name)}</td><th>Site</th><td>${esc(job.address)}</td></tr><tr><th>Instrument</th><td>${esc(job.patTester || "")}</td><th>Calibration due</th><td>${esc(ukDate(job.patCal))}</td></tr><tr><th>Items tested</th><td>${s.total}</td><th>Passed / failed</th><td>${s.pass} / ${s.fail}</td></tr></tbody></table>
 <section class="wide"><h2>Register</h2><table class="sched"><thead><tr>${["No","Description","Location","Class","Type","Fuse","Visual","Earth (Ω)","IR (MΩ)","Leak (mA)","Pol","Result","Next due","Notes"].map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>
@@ -1244,7 +1261,7 @@ function docHtml(job, kind){
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} ${esc(d.number || "")}</title>
 <style>${REPORT_CSS}
 .doc td,.doc th{border:1px solid #A6A6A6;padding:6px 8px}.doc th{background:#1B365D;color:#fff;text-align:left}.tot td{border:0;padding:3px 8px;text-align:right}.tot .big{font-size:15px;font-weight:bold;padding:4px 8px;text-align:right}.paid{color:#17663F;font-weight:bold;font-size:18px}</style></head><body>
-<div class="band"><b>${esc(co.company || "BlueForge Engineering")}</b><span>${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</span></div>
+${band(co, false)}
 <div class="sub">${title}</div>
 <table class="kv"><tbody><tr><th>${kind === "quote" ? "Quote" : "Invoice"} number</th><td>${esc(d.number || "")}</td><th>Date</th><td>${esc(ukDate(kind === "quote" ? d.created : d.date))}</td></tr>
 <tr><th>Customer</th><td>${esc(c.name || "")}<br>${esc(c.address || "")}</td><th>${kind === "quote" ? "Valid until" : "Payment due"}</th><td>${esc(kind === "quote" ? ukDate((() => { const x = new Date((d.created || today()) + "T12:00:00"); x.setDate(x.getDate() + (num(d.valid) ?? 30)); return x.toISOString().slice(0, 10); })()) : ukDate(due))}</td></tr>
@@ -1374,7 +1391,7 @@ function showLock(){
   let l = document.getElementById("lock");
   if (!l) { l = document.createElement("div"); l.id = "lock"; l.className = "lock"; document.body.appendChild(l); }
   const keys = ["1","2","3","4","5","6","7","8","9","","0","⌫"];
-  l.innerHTML = `<div class="lockin"><div class="brandmark">BLUEFORGE</div><h2>Enter your PIN</h2><div class="dots" id="pindots">${"○".repeat(settings.pinLen || 4)}</div><div id="pinmsg" class="small"></div>
+  l.innerHTML = `<div class="lockin">${LOGOS.bf ? `<img class="locklogo" src="${LOGOS.bf}" alt="BlueForge Engineering">` : `<div class="brandmark">BLUEFORGE</div>`}<h2>Enter your PIN</h2><div class="dots" id="pindots">${"○".repeat(settings.pinLen || 4)}</div><div id="pinmsg" class="small"></div>
     <div class="keypad">${keys.map(k => k ? `<button class="key" data-pin="${k}">${k}</button>` : `<span></span>`).join("")}</div>
     ${settings.bioId ? `<button class="btn ghost" data-act="bio" style="color:#fff;border-color:rgba(255,255,255,.5)">Use fingerprint / face</button>` : ""}
     <button class="linkbtn" data-act="forgotPin">Forgot PIN?</button><div id="forgot"></div></div>`;
@@ -2486,6 +2503,13 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:10.5px;color:#0F1B2D;margi
 .band{background:#1B365D;color:#fff;padding:10px 14px}
 .band b{font-size:20px;letter-spacing:.04em;display:block}
 .band span{font-size:12px}
+.band.logos{display:flex;align-items:center;gap:12px}
+.band .bt{flex:1;min-width:0}
+.band.logos{background:#fff;color:#0F1B2D;border-bottom:4px solid #1B365D;padding:8px 4px}
+.band.logos b{color:#1B365D;font-size:14px}
+.band img{flex:none;object-fit:contain}
+.band .lg{height:62px;max-width:190px}
+.band .ic{height:56px;max-width:200px}
 .sub{background:#2E75B6;color:#fff;padding:5px 14px;font-weight:bold;font-size:13px}
 h2{background:#1B365D;color:#fff;font-size:11.5px;padding:5px 8px;margin:14px 0 0;break-after:avoid}
 table{border-collapse:collapse;width:100%}
@@ -2535,7 +2559,7 @@ function exportHtml(job){
   const title = `EICR – ${job.address || job.client.name || "report"}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
 <style>${REPORT_CSS}</style></head><body>
-<div class="band"><b>${esc(co.company || "BlueForge Engineering")}</b><span>${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</span></div>
+${band(co, true)}
 <div class="sub">Electrical Installation Condition Report (EICR) – BS 7671:2018+A4:2026</div>
 <table class="kv"><tbody>${row2("Report number", job.reportNo, "Date of issue", ukDate(job.issueDate))}</tbody></table>
 ${sec("A. Contractor")}<table class="kv"><tbody>${row2("Company", co.company, "Inspector", job.inspector)}${row2("Address", co.address, "Telephone", co.phone)}${row2("Email", co.email, "Registration / scheme no.", co.reg)}</tbody></table>
@@ -2609,7 +2633,7 @@ ${sec("Part 4 – Declaration")}<p class="guide">I/We certify that the minor wor
   const title = `${TYPES[t]} – ${jobTitle(job)}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
 <style>${REPORT_CSS}</style></head><body>
-<div class="band"><b>${esc(co.company || "BlueForge Engineering")}</b><span>${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</span></div>
+${band(co, true)}
 <div class="sub">${esc(TYPE_LONG[t])} – BS 7671:2018+A4:2026</div>
 <table class="kv"><tbody>${row2("Certificate number", job.reportNo, "Date of issue", ukDate(job.issueDate))}${row2("Contractor", co.company, "Registration / scheme no.", co.reg)}</tbody></table>
 ${body}

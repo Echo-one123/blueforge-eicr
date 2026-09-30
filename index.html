@@ -39,6 +39,12 @@ body{font-family:var(--f-body);font-size:16px;line-height:1.4;-webkit-tap-highli
 button,input,select,textarea{font:inherit;color:inherit}
 .shell{max-width:640px;margin:0 auto;min-height:100vh;padding-bottom:calc(84px + env(safe-area-inset-bottom,0px))}
 .top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--navy);color:var(--on-navy);padding:10px 16px;display:flex;align-items:center;gap:10px;min-height:56px}
+.has-logo .top::after{content:"";flex:none;width:44px;height:44px;border-radius:9px;background:url(logo-mark.png) center/contain no-repeat;order:99;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))}
+.locklogo{display:block;height:70px;max-width:240px;margin:0 auto 10px;object-fit:contain;background:#fff;border-radius:12px;padding:6px}
+#splash{position:fixed;inset:0;z-index:50;background:var(--navy);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;color:var(--on-navy);transition:opacity .4s}
+#splash.gone{opacity:0;pointer-events:none}
+#splash .sl{width:min(78vw,340px);max-height:40vh;object-fit:contain;background:#fff;border-radius:20px;padding:18px 20px}
+#splash .st{font-family:var(--f-display);font-weight:700;letter-spacing:.14em;font-size:15px;opacity:.85}
 .top h1{font-family:var(--f-display);font-weight:700;font-size:20px;margin:0;letter-spacing:.02em;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .top .sub{display:block;font-family:var(--f-body);font-weight:400;font-size:12px;opacity:.75;letter-spacing:0;overflow:hidden;text-overflow:ellipsis}
 .brandmark{font-family:var(--f-display);font-weight:700;letter-spacing:.12em;font-size:12px;opacity:.8}
@@ -194,6 +200,8 @@ details.more>div{display:flex;flex-direction:column;gap:12px}
 </style>
 </head><body>
 
+<div id="splash"><img class="sl" src="logo-blueforge.png" alt="BlueForge Engineering" onerror="this.remove()"><div class="st">CERTIFICATES &amp; REPORTS</div></div>
+<script>window.__bfStart = Date.now(); setTimeout(function(){ var s = document.getElementById("splash"); if (s) s.remove(); }, 8000);</script>
 <div class="shell" id="app"></div>
 <nav class="tabs" id="tabs" hidden></nav>
 <button class="micfab" id="micfab" hidden aria-label="Speak readings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>

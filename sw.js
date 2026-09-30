@@ -1,8 +1,10 @@
 // BlueForge Certificates – offline cache. Bump CACHE on every release so devices pick up the new version.
-const CACHE = "bf-eicr-v13";
+const CACHE = "bf-eicr-v14";
 const SHELL = ["./", "./index.html", "./app.js", "./bf-data.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
+const OPTIONAL = ["./logo-blueforge.png", "./logo-inaec.png", "./logo-mark.png"];   // cached if present; a missing logo never blocks the update
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, {cache: "reload"})))).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, {cache: "reload"})))
+    .then(() => Promise.all(OPTIONAL.map(u => fetch(new Request(u, {cache: "reload"})).then(r => r.ok ? c.put(u, r) : null).catch(() => null))))).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
