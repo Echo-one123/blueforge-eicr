@@ -1781,7 +1781,7 @@ function tabCircuits(){
       <div class="grid2">${chips("Polarity confirmed","board.polarity",["✓","✗"])}${chips("Phase sequence","board.seq",["✓","✗","N/A"],{small:true})}</div>
       <div class="grid2">${field("Tested by","board.testedBy")}${field("Date tested","board.date",{type:"date"})}</div>
       ${field("Multifunction tester","board.mft")}<div class="grid2">${field("IR tester","board.irSerial")}${field("Loop / RCD tester","board.loopSerial")}</div>${field("Earth electrode tester","board.elecSerial")}
-      ${job.example ? "" : `<div class="row"><button class="btn ghost sm" data-act="chart">Circuit chart</button><button class="btn ghost sm" data-act="labels">Label strip (P-touch)</button>${typeOf(job) === "MW" ? "" : `<button class="btn ghost sm" data-act="dupBoard">Duplicate board</button>`}</div>`}
+      ${job.example ? "" : `<div class="row"><button class="btn ghost sm" data-act="chart">Circuit chart</button><button class="btn ghost sm" data-act="copyLabels">Copy label text</button><button class="btn ghost sm" data-act="labels">Label picture</button>${typeOf(job) === "MW" ? "" : `<button class="btn ghost sm" data-act="dupBoard">Duplicate board</button>`}</div>`}
       ${job.boards.length > 1 && !job.example ? (view.confirmDel === "board" ? `<div class="row"><span class="small">Delete this board and its ${b.circuits.length} circuits?</span><button class="btn danger sm" data-act="delBoard">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="board">Delete board</button>`) : ""}
     </div></details>
   </div>
@@ -1982,6 +1982,9 @@ document.addEventListener("click", e => {
     case "dupBoard": { const b = curBoard(); const nb = copyBoard(b, job.boards.length + 1); job.boards.push(nb); view.board = job.boards.length - 1; markDirty(job); render(); toast(`${nb.ref} created with the same circuits – rename it and test`); break; }
     case "chart": printHtml(circuitChartHtml(job, curBoard()), "circuits"); break;
     case "labels": saveLabelStrip(job, curBoard()); break;
+    case "copyLabels": { const t = curBoard().circuits.map(c => `${c.no} ${c.desc || ""} ${devShort(c).replace(" MCB", "")}`.replace(/\s+/g, " ").trim()).join("\n");
+      const done = () => toast(`Copied ${curBoard().circuits.length} labels – paste them into Pro Label Tool one per breaker`);
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, () => toast(t)); else toast(t); break; }
     case "openDanger": view.tab = "danger"; render(); break;
     case "backToReport": view.tab = "report"; render(); break;
     case "sendDanger": sendDanger(); break;
