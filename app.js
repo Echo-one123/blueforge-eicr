@@ -3409,7 +3409,8 @@ function renderBook(){
   if (!ch && view.chapter !== "calc") return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Handbook<span class="sub">On-site guide</span></h1></header>
   <main><div class="muted small">Practical reminders in plain English. BS 7671 and the manufacturer's data always come first.</div>
     <button class="card-link" data-act="chapter" data-id="calc"><div class="grow"><div class="t">Calculators</div><div class="d">Volt drop · adiabatic · max Zs · R1+R2 · PFC · rings · TT · IR · It · max demand · Ohm's law</div></div></button>
-    ${BF_BOOK.map(b => `<button class="card-link" data-act="chapter" data-id="${b.id}"><div class="grow"><div class="t">${esc(b.t)}</div></div></button>`).join("")}</main>`;
+    ${BF_BOOK.filter(b => !b.g).map(b => `<button class="card-link" data-act="chapter" data-id="${b.id}"><div class="grow"><div class="t">${esc(b.t)}</div></div></button>`).join("")}
+    ${[...new Set(BF_BOOK.filter(b => b.g).map(b => b.g))].map(g => `<section class="hgrp"><h3>${esc(g)}</h3>${BF_BOOK.filter(b => b.g === g).map(b => `<button class="card-link" data-act="chapter" data-id="${b.id}"><div class="grow"><div class="t">${esc(b.t)}</div></div></button>`).join("")}</section>`).join("")}</main>`;
   const body = view.chapter === "calc" ? calcHtml() : `<div class="card book">${ch.h.replace("{{ZS_TABLE}}", zsTableHtml()).replace("{{RES_TABLE}}", resTableHtml())}</div>`;
   return `<header class="top"><button class="iconbtn" data-act="bookHome" aria-label="Back to contents">←</button><h1>${esc(ch ? ch.t : "Calculators")}<span class="sub">Handbook</span></h1></header><main>${body}</main>`;
 }
