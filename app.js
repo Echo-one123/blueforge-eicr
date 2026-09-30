@@ -1538,7 +1538,24 @@ function renderCustomer(){
 
 /* ---------------- training (EWA / AM2E / 2391) */
 const DAY = 86400000, SR_GAPS = [0, 1, 3, 7, 14, 30];
-const tr = () => { const t = settings.train = settings.train || {}; t.s = t.s || {}; t.am2e = t.am2e || {}; t.hist = t.hist || []; t.ai = t.ai || []; return t; };
+const tr = () => { const t = settings.train = settings.train || {}; t.s = t.s || {}; t.am2e = t.am2e || {}; t.hist = t.hist || []; t.ai = t.ai || []; t.read = t.read || {}; return t; };
+const lessonFor = topic => (window.BF_LESSONS || []).find(l => l.topic === topic);
+function renderLesson(){
+  const L = lessonFor(view.lessonTopic); if (!L) { view = {screen:"train"}; return renderTrain(); }
+  const n = allQ().filter(q => q.topic === L.topic).length, st = view.steps = view.steps || {};
+  return `<header class="top"><button class="iconbtn" data-act="train" aria-label="Back">←</button><h1>${esc(L.title)}<span class="sub">${esc(L.topic)} · ${L.mins} min read</span></h1></header>
+  <main>
+    <div class="card lesson">${mdLite(L.body)}${L.ref && L.ref !== L.topic ? `<div class="small muted">Ref: ${esc(L.ref)}</div>` : ""}</div>
+    ${(L.worked || []).map((w, i) => { const shown = st[i] || 0, all = shown >= w.steps.length;
+      return `<div class="card"><h2>Worked example ${i + 1}</h2><div class="qtext" style="font-size:16px">${esc(w.q)}</div>
+        ${shown === 0 ? `<div class="muted small">Have a go on paper first, then reveal the working one step at a time.</div>` : ""}
+        <ol class="wsteps">${w.steps.slice(0, shown).map(x => `<li>${esc(x.replace(/^\d+[.)]\s*/, ""))}</li>`).join("")}</ol>
+        ${all ? `<div class="qexp ok"><b>Answer:</b> ${esc(w.answer)}</div>` : `<div class="row"><button class="btn sm" data-act="wStep" data-i="${i}">${shown ? "Next step" : "Show the first step"}</button><button class="btn ghost sm" data-act="wAll" data-i="${i}">Show all</button></div>`}</div>`; }).join("")}
+    ${(L.keys || []).length ? `<div class="card"><h2>Remember</h2><ul class="small">${L.keys.map(k => `<li>${esc(k)}</li>`).join("")}</ul></div>` : ""}
+    <div class="row"><button class="btn" data-act="lessonQuiz">Practise these ${n} questions</button><span class="spacer"></span>${tr().read[L.id] ? pill("pass","Read") : `<button class="btn ghost sm" data-act="lessonRead">Mark as read</button>`}</div>
+    <div class="muted small" style="padding:12px 4px 20px">Original lesson written for this app and independently checked against BS 7671:2018+A2:2022 and GN3. Check anything critical against your own books.</div>
+  </main>`;
+}
 const allQ = () => (window.BF_QB || []).concat(tr().ai);
 const qById = id => allQ().find(q => q.id === id);
 const shuffle = a => { const b = a.slice(); for (let i = b.length - 1; i > 0; i--) { const k = Math.floor(Math.random() * (i + 1)); [b[i], b[k]] = [b[k], b[i]]; } return b; };
@@ -1579,7 +1596,7 @@ function renderTrain(){
         <button class="tile" data-act="trMock"><b>Mock exam</b><span>40 questions · 60 min · marked at the end</span></button>
         <button class="tile" data-act="am2e"><b>AM2E checklist</b><span>${amDone}/${amTot} ticked off</span></button>
       </div></div>
-    ${Object.entries(areas).map(([area, list]) => `<div class="card"><h2>${esc(area)}</h2>${list.sort((a, b) => a[0].localeCompare(b[0])).map(([k, o]) => `<button class="card-link trtopic" data-act="trTopic" data-t="${esc(k)}"><div class="grow"><div class="t">${esc(k)}</div>${bar(o)}</div></button>`).join("")}</div>`).join("")}
+    ${Object.entries(areas).map(([area, list]) => `<div class="card"><h2>${esc(area)}</h2>${list.sort((a, b) => a[0].localeCompare(b[0])).map(([k, o]) => { const L = lessonFor(k); return `<div class="trrow"><button class="card-link trtopic" data-act="${L ? "lesson" : "trTopic"}" data-t="${esc(k)}"><div class="grow"><div class="t">${esc(k)}</div>${bar(o)}${L ? `<span class="small ${t.read[L.id] ? "okc" : "muted"}">${t.read[L.id] ? "✓ Lesson read" : "📖 Lesson · " + L.mins + " min"}</span>` : ""}</div></button><button class="btn ghost sm trq" data-act="trTopic" data-t="${esc(k)}" aria-label="Practise ${esc(k)}">Quiz</button></div>`; }).join("")}</div>`).join("")}
     <div class="card"><h2>Make more questions (AI)</h2><div class="muted small">The AI writes fresh questions on any topic, with full working. They're marked "AI – not checked": treat them as extra practice, not gospel. Needs signal.</div>
       <label class="field" for="aitopic"><span>Topic</span><input id="aitopic" placeholder="e.g. voltage drop on long SWA runs, Section 701 zones"></label>
       <div class="row"><button class="btn sm" data-act="trAiGen">Make 5 questions</button>${t.ai.length ? `<span class="small muted">${t.ai.length} AI questions saved</span><button class="btn ghost sm" data-act="trAiClear">Remove them</button>` : ""}</div><div id="aigenmsg"></div></div>
@@ -1602,7 +1619,7 @@ function renderQuiz(){
       <div class="qtext">${esc(q.q)}</div>
       ${q.calc && !show ? `<div class="muted small">Work it out on paper first – formula, numbers in, answer – then pick.</div>` : ""}
       <div class="qopts">${q.options.map(opt).join("")}</div>
-      ${show ? `<div class="qexp ${pick === q.answer ? "ok" : "no"}"><b>${pick === q.answer ? "Correct." : "Not quite – the answer is " + "ABCD"[q.answer] + "."}</b>${mdLite(q.explain)}${q.ref ? `<div class="small muted">Ref: ${esc(q.ref)}</div>` : ""}</div>` : ""}
+      ${show ? `<div class="qexp ${pick === q.answer ? "ok" : "no"}"><b>${pick === q.answer ? "Correct." : "Not quite – the answer is " + "ABCD"[q.answer] + "."}</b>${mdLite(q.explain)}${q.ref ? `<div class="small muted">Ref: ${esc(q.ref)}</div>` : ""}${pick !== q.answer && lessonFor(q.topic) ? `<button class="btn ghost sm" data-act="qLesson" data-t="${esc(q.topic)}">Read the ${esc(q.topic)} lesson</button>` : ""}</div>` : ""}
     </div>
     <div class="row">${mock && z.i > 0 ? `<button class="btn ghost" data-act="qPrev">‹ Back</button>` : ""}<span class="spacer"></span>
       ${show || mock ? `<button class="btn" data-act="qNext">${z.i < n - 1 ? "Next ›" : mock ? "Finish & mark" : "See results"}</button>` : ""}</div>
@@ -2445,6 +2462,7 @@ function render(){
   else if (view.screen === "customer") html = renderCustomer();
   else if (view.screen === "quiz" && view.quiz) { html = renderQuiz(); if (view.quiz.limitMin && !view.quiz.done) setTimeout(tickQuiz, 0); }
   else if (view.screen === "am2e") html = renderAm2e();
+  else if (view.screen === "lesson") html = renderLesson();
   else if (view.screen === "money") html = billingOk() ? renderMoney() : renderHome();
   else if (view.screen === "job") { if (curJob() && !curJob().deleted) html = renderJob(); else { view = {screen:"home", tab:"job", board:0, circ:null}; html = renderHome(); } }
   app.innerHTML = html;
@@ -3231,6 +3249,12 @@ document.addEventListener("click", e => {
     case "trCards": startQuiz("practice", dueIds().slice(0, 20), "Revise"); break;
     case "trWeak": startQuiz("practice", shuffle(weakIds()).slice(0, 20), "Weak spots"); break;
     case "trCalc": startQuiz("practice", shuffle(allQ().filter(q => q.calc)).slice(0, 15), "Calculations"); break;
+    case "lesson": view = {screen:"lesson", lessonTopic: a.dataset.t, steps: {}}; render(); break;
+    case "wStep": view.steps[a.dataset.i] = (view.steps[a.dataset.i] || 0) + 1; rerender(); break;
+    case "wAll": view.steps[a.dataset.i] = 99; rerender(); break;
+    case "lessonRead": { const L = lessonFor(view.lessonTopic); if (L) { tr().read[L.id] = true; lsWrite(); rerender(); } break; }
+    case "lessonQuiz": { const L = lessonFor(view.lessonTopic); if (L) { tr().read[L.id] = true; lsWrite(); startQuiz("practice", shuffle(allQ().filter(q => q.topic === L.topic)).slice(0, 20).map(q => q.id), L.topic); } break; }
+    case "qLesson": view = {screen:"lesson", lessonTopic: a.dataset.t, steps: {}}; render(); break;
     case "trTopic": startQuiz("practice", shuffle(allQ().filter(q => q.topic === a.dataset.t)).slice(0, 20).map(q => q.id), a.dataset.t); break;
     case "trMock": { const A = shuffle((window.BF_QB || []).filter(q => q.area === "Regs & theory")).slice(0, 20), B = shuffle((window.BF_QB || []).filter(q => q.area === "Calcs & testing")).slice(0, 20); startQuiz("mock", shuffle(A.concat(B)).map(q => q.id), "Mock exam", 60); break; }
     case "trRetry": { const z = view.quiz; const wrong = z.ids.filter(id => { const q = qById(id); return q && z.picks[id] !== q.answer; }); startQuiz("practice", wrong, "Retry missed"); break; }
