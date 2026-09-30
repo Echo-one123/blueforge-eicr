@@ -737,6 +737,16 @@ function openViewer(id){
     <div class="vimg">${src ? `<img src="${src}" alt="Photo">` : `<div class="muted">This photo hasn't downloaded to this device yet.</div>`}</div>`;
   v.hidden = false;
 }
+document.addEventListener("change", e => {
+  const rb = e.target.closest && e.target.closest("[data-readboard]");
+  if (rb && rb.files && rb.files[0]) { clearPhotoPending(); const f = rb.files[0]; readBoardFromFile(rb.dataset.readboard, f); rb.value = ""; return; }
+  const rs = e.target.closest && e.target.closest("select[data-rb]");
+  if (rs && view.read) { const d = view.read.devs[+rs.dataset.rb]; d[rs.dataset.k] = rs.value; if (rs.value === "blank") d.use = false; rerender(); }
+});
+document.addEventListener("input", e => {
+  const ri = e.target.closest && e.target.closest("input[data-rb]");
+  if (ri && view.read) { const d = view.read.devs[+ri.dataset.rb]; d[ri.dataset.k] = ri.value; if (ri.dataset.k === "rating" && d.conf === "low" && ri.value) d.conf = "medium"; }
+});
 document.addEventListener("change", async e => {
   const inp = e.target.closest && e.target.closest("[data-photo-target]");
   if (!inp) return;
@@ -1335,6 +1345,99 @@ function billingCard(){
     <button class="btn sm" data-act="billingOn" ${settings.sendUrl ? "" : "disabled"}>Unlock owner access</button><div id="billmsg"></div>`}</div>`;
 }
 
+/* ---------------- read a board from a photo (AI via the Google script) */
+function readBoardCard(job, b){
+  if (job.example || typeOf(job) === "PAT" || typeOf(job) === "MW") return "";
+  const t = "read:" + b.id;
+  return `<div class="card readcard"><div class="row"><b style="flex:1">Read board from photo</b>${pill("none","needs signal")}</div>
+    <div class="muted small">Photo with the cover off, straight on, all devices in shot. It fills in devices, ratings, RCDs and names for you to check – nothing is saved until you confirm. The photo also goes in the board's "Cover off" slot.</div>
+    <div class="row"><label class="btn sm" for="rb-cam-${esc(b.id)}" data-photo-open="${esc(t)}">📷 Take photo</label><input type="file" id="rb-cam-${esc(b.id)}" data-readboard="${esc(b.id)}" accept="image/*" capture="environment" hidden>
+    <label class="btn ghost sm" for="rb-gal-${esc(b.id)}">Gallery</label><input type="file" id="rb-gal-${esc(b.id)}" data-readboard="${esc(b.id)}" accept="image/*" hidden></div>
+    <div id="rbmsg-${esc(b.id)}"></div></div>`;
+}
+const RB_KINDS = [["mcb","MCB"],["rcbo","RCBO"],["rcd","RCD"],["ms","Main switch"],["spd","SPD"],["fuse","Fuse"],["afdd","AFDD"],["blank","Blank / spare"],["other","Other"]];
+async function readBoardFromFile(boardId, file){
+  const job = j(), b = job && job.boards.find(x => x.id === boardId); if (!b) return;
+  const m = () => document.getElementById("rbmsg-" + boardId);
+  const say = (h) => { const e = m(); if (e) e.innerHTML = h; };
+  if (!settings.sendUrl) { say(`<div class="errline">Set up sync first (⚙ Settings) – the photo is read through your Google script.</div>`); return; }
+  say(`<div class="muted small">Shrinking photo…</div>`);
+  let c; try { c = await compressImage(file); } catch(e){ say(`<div class="errline">${esc(e.message || e)}</div>`); return; }
+  // keep it as the board's cover-off photo too
+  try { const id = uid(); await photoPut({ id, jobId: job.id, data: c.data, w: c.w, h: c.h, created: Date.now(), uploaded: false }); photoCache.set(id, c.data); pendingUploads.add(id); const p = ensurePhotos(job), k = "b:" + b.id + ":off"; (p.slots[k] = p.slots[k] || []).push(id); delete p.na[k]; markDirty(job); scheduleSync(3000); } catch(e){}
+  if (navigator.onLine === false) { say(`<div class="warnline">No signal – the photo is saved in "Cover off". Tap <b>Gallery</b> and pick it again once you have signal.</div>`); return; }
+  say(`<div class="muted small"><span class="pulse"></span> Reading the board… (10–30 seconds)</div>`);
+  try {
+    const o = await api("readBoard", { image: c.data.split(",")[1], mediaType: "image/jpeg", boardRef: b.ref });
+    const devs = ((o.board && o.board.devices) || []).map(d => ({
+      kind: RB_KINDS.some(k => k[0] === d.kind) ? d.kind : "other", curve: ["B","C","D"].includes(String(d.curve || "").toUpperCase()) ? String(d.curve).toUpperCase() : "",
+      rating: d.rating == null ? "" : String(d.rating), ma: d.ma == null ? "" : String(d.ma), rcdType: RCD_TYPES.includes(d.rcdType) ? d.rcdType : "",
+      poles: d.poles || 1, label: String(d.label || "").trim(), conf: ["high","medium","low"].includes(d.confidence) ? d.confidence : "medium", use: d.kind !== "blank" }));
+    if (!devs.length) { say(`<div class="errline">No devices found – try a closer, straighter photo with the cover off.</div>`); return; }
+    view.read = { boardId, devs, notes: String((o.board && o.board.notes) || ""), mode: b.circuits.some(x => x.desc || x.dev) ? "update" : "new" };
+    view.tab = "readboard"; view.circ = null; render();
+  } catch(e){ say(`<div class="errline">${esc(e.message || e)}</div>`); }
+}
+function tabReadBoard(){
+  const job = j(), r = view.read, b = r && job.boards.find(x => x.id === r.boardId);
+  if (!b) { view.tab = "circuits"; return tabCircuits(); }
+  const kindSel = (d, i) => `<select data-rb="${i}" data-k="kind">${RB_KINDS.map(([k, l]) => `<option value="${k}"${d.kind === k ? " selected" : ""}>${l}</option>`).join("")}</select>`;
+  const inp = (i, k, v, ph, w) => `<input data-rb="${i}" data-k="${k}" value="${esc(v)}" placeholder="${ph}" style="width:${w}" ${k === "rating" || k === "ma" ? 'inputmode="decimal"' : ""}>`;
+  const rows = r.devs.map((d, i) => `<div class="rbrow${d.use ? "" : " off"}${d.conf === "low" ? " low" : ""}">
+    <div class="row"><button type="button" class="chip small" data-act="rbUse" data-i="${i}" aria-pressed="${d.use}">${d.use ? "✓" : "–"}</button><b class="rbpos">${i + 1}</b>${kindSel(d, i)}
+      ${d.conf === "low" ? pill("fail","check this") : d.conf === "medium" ? pill("check","unsure") : ""}</div>
+    ${["mcb","rcbo"].includes(d.kind) ? `<div class="row">${["B","C","D"].map(cv => `<button type="button" class="chip small" data-act="rbCurve" data-i="${i}" data-v="${cv}" aria-pressed="${d.curve === cv}">${cv}</button>`).join("")}${inp(i,"rating",d.rating,"A","64px")}<span class="small">A</span></div>` : ["ms","fuse","afdd","other","rcd"].includes(d.kind) ? `<div class="row">${inp(i,"rating",d.rating,"A","64px")}<span class="small">A</span></div>` : ""}
+    ${["rcd","rcbo"].includes(d.kind) ? `<div class="row">${inp(i,"ma",d.ma,"mA","64px")}<span class="small">mA</span>${RCD_TYPES.slice(0,4).map(t => `<button type="button" class="chip small" data-act="rbType" data-i="${i}" data-v="${t}" aria-pressed="${d.rcdType === t}">${t}</button>`).join("")}</div>` : ""}
+    ${["mcb","rcbo","fuse","other"].includes(d.kind) ? inp(i,"label",d.label,"Circuit name","100%") : ""}
+  </div>`).join("");
+  const nC = r.devs.filter(d => d.use && ["mcb","rcbo","fuse","other"].includes(d.kind)).length;
+  return `<div class="card"><h2>Check the board – ${esc(b.ref || "Board")}</h2>
+    <div class="muted small">Read from your photo, left to right. Fix anything that's wrong, untick anything that shouldn't be there. Ratings you're not sure of are marked – check them against the devices.</div>
+    ${r.notes ? `<div class="warnline small">${esc(r.notes)}</div>` : ""}
+    ${b.circuits.length ? `<div class="field"><span>This board already has ${b.circuits.length} circuit${b.circuits.length === 1 ? "" : "s"}</span><div class="chips">${[["update","Update them in order (keeps your readings)"],["new","Add as extra circuits"]].map(([k, l]) => `<button type="button" class="chip" data-act="rbMode" data-v="${k}" aria-pressed="${r.mode === k}">${l}</button>`).join("")}</div></div>` : ""}
+  </div>
+  <div class="card">${rows}</div>
+  <div class="card"><div class="muted small">${nC} circuit${nC === 1 ? "" : "s"} · MCBs after an RCD are set as protected by it · main switch, RCDs and SPD go into the labels</div>
+    <div class="row"><button class="btn" data-act="rbApply">Confirm and fill in</button><button class="btn ghost" data-act="rbCancel">Cancel</button></div></div>`;
+}
+function applyBoardRead(){
+  const job = j(), r = view.read, b = r && job.boards.find(x => x.id === r.boardId); if (!b) return;
+  const devName = d => d.kind === "mcb" ? `BS EN 60898 MCB Type ${d.curve || "B"}` : d.kind === "rcbo" ? `BS EN 61009 RCBO Type ${d.curve || "B"}` : d.kind === "fuse" ? "" : "";
+  const extras = [], circ = [];
+  let rcd = null;
+  r.devs.filter(d => d.use).forEach(d => {
+    if (d.kind === "ms") { extras.push({ id: uid(), kind:"ms", text:"MAIN SWITCH", sub: d.rating ? d.rating + "A" : "", pos: circ.length, mods: Math.max(1, Math.min(4, d.poles || 2)) }); rcd = null; if (job.boards.indexOf(b) === 0 && !job.supply.msRating && d.rating) job.supply.msRating = d.rating; }
+    else if (d.kind === "rcd") { extras.push({ id: uid(), kind:"rcd", text:"RCD", sub: d.ma ? d.ma + "mA" : "", pos: circ.length, mods: Math.max(1, Math.min(4, d.poles || 2)) }); rcd = d; }
+    else if (d.kind === "spd") extras.push({ id: uid(), kind:"spd", text:"SPD", sub:"", pos: circ.length, mods: Math.max(1, Math.min(4, d.poles || 1)) });
+    else if (d.kind === "afdd") extras.push({ id: uid(), kind:"other", text:"AFDD", sub: d.rating ? d.rating + "A" : "", pos: circ.length, mods: 1 });
+    else if (["mcb","rcbo","fuse","other"].includes(d.kind)) circ.push({ d, rcd: d.kind === "mcb" ? rcd : null });
+  });
+  const fill = (c, x) => { const d = x.d;
+    if (d.label) c.desc = d.label;
+    if (d.kind === "mcb" || d.kind === "rcbo") { c.dev = devName(d); c.rating = d.rating; }
+    else if (d.kind === "fuse" || d.kind === "other") { c.dev = "Other (see mfr data)"; c.rating = d.rating; }
+    if (d.kind === "rcbo") { c.rcd = d.ma || "30"; c.rcdType = d.rcdType || c.rcdType || ""; }
+    else if (x.rcd) { c.rcd = x.rcd.ma || "30"; c.rcdType = x.rcd.rcdType || c.rcdType || ""; }
+    else if (d.kind === "mcb") { c.rcd = ""; c.rcdType = ""; } };
+  if (r.mode === "update" && b.circuits.length) {
+    circ.forEach((x, i) => { if (b.circuits[i]) fill(b.circuits[i], x); else { const c = newCircuit(b.circuits.length + 1); fill(c, x); b.circuits.push(c); } });
+  } else {
+    const start = r.mode === "new" ? b.circuits.length : 0;
+    circ.forEach((x, i) => { const c = newCircuit(start + i + 1); fill(c, x); b.circuits.push(c); });
+    extras.forEach(e => e.pos += start);
+  }
+  b.labExtras = extras.length ? extras : b.labExtras;
+  markDirty(job); view.read = null; view.tab = "circuits"; render();
+  toast(`${circ.length} circuit${circ.length === 1 ? "" : "s"} filled in – check each one and add your test results`);
+}
+function aiCard(){
+  if (!billingOk()) return "";
+  return `<div class="card"><h2>Board photo reading (AI)</h2><div class="muted small">Reads devices and ratings from a photo of a board. Needs an Anthropic API key (console.anthropic.com → API keys). The key is stored in your Google script only – never on the phones.</div>
+    ${settings.aiReady ? `<div class="row">${pill("pass","Set up")}<span class="spacer"></span><button class="btn ghost sm" data-act="aiOff">Remove key</button></div>` : ""}
+    <label class="field" for="aikey"><span>${settings.aiReady ? "Replace key" : "Anthropic API key"}</span><input id="aikey" type="password" autocomplete="off" placeholder="sk-ant-…"></label>
+    <button class="btn sm" data-act="aiSave">Save key to Google script</button><div id="aimsg"></div></div>`;
+}
+
 /* ---------------- linked devices (owner only) */
 let devList = null, devErr = "";
 async function deviceRemoved(){
@@ -1680,6 +1783,15 @@ var KEY = "${settings.sendKey}";
 var OFFICE = "${settings.officeEmail}";
 var FOLDER_NAME = "BlueForge EICR";   // created in your Google Drive on first use. To use a shared drive folder, put its ID in FOLDER_ID below.
 var FOLDER_ID = "";
+var AI_MODEL = "claude-sonnet-5-5";   // model used to read board photos – change here if Anthropic retires it
+var BOARD_PROMPT = "This is a photo of an electrical consumer unit or distribution board in the UK with the cover off (or with the device fronts visible). " +
+  "List every device on the DIN rail(s) strictly from LEFT to RIGHT as seen in the photo (if there are several rows, do the top row first). Include blank/spare ways. " +
+  "For each device give: kind (one of: ms = main switch/isolator, rcd = RCCB/RCD, mcb, rcbo, spd = surge protector, fuse, afdd, blank, other), " +
+  "curve (B, C or D for mcb/rcbo, from the marking such as B32), rating in amps (number), ma (RCD residual current in mA, for rcd/rcbo), rcdType (AC, A, F or B if shown by marking or symbol), " +
+  "poles (1, 2, 3 or 4), label (any circuit name written on or next to the device, or from a circuit chart visible in the photo, else empty), " +
+  "and confidence (high, medium or low – low if the marking is not clearly readable). Never guess a rating you cannot see: use null and confidence low. " +
+  "Reply with JSON only, no other text, in exactly this shape: " +
+  '{"devices":[{"kind":"mcb","curve":"B","rating":32,"ma":null,"rcdType":"","poles":1,"label":"Sockets","confidence":"high"}],"notes":"anything the electrician should check"}';
 
 function doPost(e) {
   try {
@@ -1701,6 +1813,29 @@ function doPost(e) {
       if (d.action === "devices") { var list = []; for (var k in devs) { var x = devs[k]; x.id = k; list.push(x); } return reply({ok: true, devices: list}); }
       if (d.action === "revokeDevice" || d.action === "restoreDevice") { if (devs[d.id]) { devs[d.id].revoked = d.action === "revokeDevice"; P.setProperty("devices", JSON.stringify(devs)); } return reply({ok: true}); }
       if (d.action === "rotateKey") { if (!/^bf-[a-z0-9]{12,}$/.test(d.newKey || "")) return reply({ok: false, error: "Bad key"}); P.setProperty("key", d.newKey); return reply({ok: true}); }
+    }
+    if (d.action === "ping") return reply({ok: true, ai: !!P.getProperty("aiKey")});
+    if (d.action === "setAiKey") {
+      if (!isOwner) return reply({ok: false, error: "Only the owner can set the AI key"});
+      var nk2 = String(d.aiKey || "").trim();
+      if (nk2 && !/^sk-ant-/.test(nk2)) return reply({ok: false, error: "That doesn't look like an Anthropic API key (it should start sk-ant-)"});
+      if (nk2) P.setProperty("aiKey", nk2); else P.deleteProperty("aiKey");
+      return reply({ok: true, ai: !!nk2});
+    }
+    if (d.action === "readBoard") {
+      var ak = P.getProperty("aiKey");
+      if (!ak) return reply({ok: false, error: "Board reading isn't set up yet – the owner adds the AI key in Settings > Owner access"});
+      var body = {model: AI_MODEL, max_tokens: 4000, messages: [{role: "user", content: [
+        {type: "image", source: {type: "base64", media_type: d.mediaType || "image/jpeg", data: d.image}},
+        {type: "text", text: BOARD_PROMPT}]}]};
+      var r = UrlFetchApp.fetch("https://api.anthropic.com/v1/messages", {method: "post", contentType: "application/json",
+        headers: {"x-api-key": ak, "anthropic-version": "2023-06-01"}, payload: JSON.stringify(body), muteHttpExceptions: true});
+      var code = r.getResponseCode(), rt = r.getContentText();
+      if (code !== 200) { var em = rt.slice(0, 200); try { em = JSON.parse(rt).error.message; } catch (x) {} return reply({ok: false, error: "AI reading failed (" + code + "): " + em}); }
+      var txt = (JSON.parse(rt).content || []).filter(function (c) { return c.type === "text"; }).map(function (c) { return c.text; }).join("");
+      var mm = txt.match(/\\{[\\s\\S]*\\}/);
+      if (!mm) return reply({ok: false, error: "Couldn't make sense of that photo – try a straighter, closer shot with the cover off"});
+      try { return reply({ok: true, board: JSON.parse(mm[0])}); } catch (x) { return reply({ok: false, error: "Couldn't make sense of that photo – try again"}); }
     }
     var action = d.action || (d.test ? "test" : (d.reportHtml ? "send" : ""));
     if (action === "test") {
@@ -1799,7 +1934,7 @@ function readIndex_() { var f = file_(sub_("Data"), "index.json"); return f ? JS
 function writeIndex_(idx) { var data = sub_("Data"), f = file_(data, "index.json"), s = JSON.stringify(idx); if (f) f.setContent(s); else data.createFile("index.json", s, "application/json"); }
 function reply(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
 // Run once from the editor to grant permission to send email and use Drive.
-function authorise() { MailApp.getRemainingDailyQuota(); folder_(); }
+function authorise() { MailApp.getRemainingDailyQuota(); folder_(); UrlFetchApp.fetch("https://api.anthropic.com", {muteHttpExceptions: true}); }
 `;
 }
 
@@ -2011,6 +2146,7 @@ function renderSettings(){
     </div>
     ${lockCard()}
     ${billingCard()}
+    ${aiCard()}
     ${devicesCard()}
     ${billingOk() ? `<div class="card"><h2>Prices</h2><div class="muted small">Used to price remedial quotes and invoices. These are examples – change them to your own.</div>
       ${priceList().map((p, i) => `<div class="row" style="align-items:flex-end;flex-wrap:nowrap">${field("Item", "settings.prices." + i + ".desc")}<div style="width:110px;flex:none">${field("Price", "settings.prices." + i + ".price", {num:true, unit:"£"})}</div><button class="btn ghost sm" data-act="delPrice" data-i="${i}" aria-label="Remove">✕</button></div>`).join("")}
@@ -2045,11 +2181,11 @@ const TABS = {
 function renderJob(){
   const job = curJob();
   const t = typeOf(job);
-  if (!TABS[t].some(x => x[0] === view.tab) && !(view.tab === "danger" && t === "EICR") && !(view.tab === "labels" && t !== "PAT") && !(view.tab === "quote" && t === "EICR" && billingOk()) && !(view.tab === "invoice" && billingOk())) view.tab = "job";
+  if (!TABS[t].some(x => x[0] === view.tab) && !(view.tab === "danger" && t === "EICR") && !(view.tab === "labels" && t !== "PAT") && !(view.tab === "readboard" && view.read) && !(view.tab === "quote" && t === "EICR" && billingOk()) && !(view.tab === "invoice" && billingOk())) view.tab = "job";
   if (view.tab === "circuits" && curCirc()) return renderCircuit();
   if (view.tab === "pat" && view.patItem && job.pat && job.pat.items.some(x => x.id === view.patItem)) return renderPatItem();
   loadJobPhotos(job);
-  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, labels:tabLabels, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
+  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, labels:tabLabels, readboard:tabReadBoard, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
   return `<header class="top"><button class="iconbtn" data-act="home" aria-label="All jobs">←</button><h1>${esc(jobTitle(job) === "Untitled job" ? "New " + TYPES[t] : jobTitle(job))}<span class="sub">${job.example ? "Example – not saved" : esc(TYPES[t]) + (job.reportNo ? " · " + esc(job.reportNo) : "")}</span></h1></header>
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example report – edits aren't saved</div>` : statusHtml()}
   ${job.handoff && !job.sig && billingOk() && view.tab === "job" ? `<main style="padding-bottom:0"><div class="warnline">Tested by ${esc(job.handoff.by)} and sent for sign-off ${esc(agoText(job.handoff.at))}. Check it through, then sign on the ${t === "EICR" ? "Report" : "Certify"} tab.</div></main>` : ""}
@@ -2319,6 +2455,7 @@ function tabCircuits(){
       ${job.boards.length > 1 && !job.example ? (view.confirmDel === "board" ? `<div class="row"><span class="small">Delete this board and its ${b.circuits.length} circuits?</span><button class="btn danger sm" data-act="delBoard">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="board">Delete board</button>`) : ""}
     </div></details>
   </div>
+  ${readBoardCard(job, b)}
   <div class="card"><h2>Circuits <span class="count">${counts.pass} pass · ${counts.check} check · ${counts.fail} fail</span></h2>
     ${list ? `<div style="display:flex;flex-direction:column;gap:8px">${list}</div>` : `<div class="empty">No circuits on this board yet.</div>`}
     <button class="btn block" data-act="addCirc">+ Add circuit</button>
@@ -2557,6 +2694,16 @@ document.addEventListener("click", e => {
     case "chart": printHtml(circuitChartHtml(job, curBoard()), "circuits"); break;
     case "labels": case "openLabels": view.tab = "labels"; view.circ = null; render(); break;
     case "labToggle": { const c = curBoard().circuits[+a.dataset.i]; if (c) { c.noLabel = !c.noLabel; markDirty(job); rerender(); } break; }
+    case "rbUse": { const d = view.read.devs[+a.dataset.i]; d.use = !d.use; rerender(); break; }
+    case "rbCurve": { const d = view.read.devs[+a.dataset.i]; d.curve = a.dataset.v; d.conf = d.conf === "low" && d.rating ? "medium" : d.conf; rerender(); break; }
+    case "rbType": { const d = view.read.devs[+a.dataset.i]; d.rcdType = d.rcdType === a.dataset.v ? "" : a.dataset.v; rerender(); break; }
+    case "rbApply": applyBoardRead(); break;
+    case "rbMode": view.read.mode = a.dataset.v; rerender(); break;
+    case "rbCancel": view.read = null; view.tab = "circuits"; render(); break;
+    case "aiSave": (async () => { const k = (document.getElementById("aikey") || {}).value || ""; const m = document.getElementById("aimsg");
+      try { await api("setAiKey", { aiKey: k.trim() }); settings.aiReady = true; lsWrite(); rerender(); toast("AI key saved to your Google script"); }
+      catch(err){ if (m) m.innerHTML = `<div class="errline">${esc(/Unknown action/i.test(err.message) ? "Your Google script needs updating first – paste in the new script and redeploy." : err.message)}</div>`; } })(); break;
+    case "aiOff": (async () => { try { await api("setAiKey", { aiKey: "" }); settings.aiReady = false; lsWrite(); rerender(); toast("AI key removed"); } catch(err){ toast(String(err.message || err)); } })(); break;
     case "lostOk": view.photoLost = null; rerender(); break;
     case "labCsv": saveLabelCsv(job, curBoard()); break;
     case "exAdd": { const b = curBoard(), k = a.dataset.kind, [t, m] = EXTRA_KINDS[k]; labExtras(job, b).push({ id: uid(), kind: k, text: t, sub: k === "rcd" ? "30mA" : "", pos: 0, mods: m }); markDirty(job); rerender(); break; }
@@ -2590,7 +2737,7 @@ document.addEventListener("click", e => {
     case "copyCode": { const t = document.getElementById("conncode"); if (!t) break; const ok = () => { const m = document.getElementById("sendmsg"); a.textContent = "Copied"; };
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t.value).then(ok, () => { t.focus(); t.select(); }); else { t.focus(); t.select(); } break; }
     case "join": { const m = document.getElementById("joinmsg"); try { applyConnectionCode(document.getElementById("joincode").value); if (m) m.innerHTML = `<div class="muted small">Checking…</div>`;
-      api("test", {}).then(() => { const m2 = document.getElementById("joinmsg"); if (m2) m2.innerHTML = `<div class="muted small">Connected. Syncing now…</div>`; syncNow().then(() => rerender()); })
+      api("ping", {}).catch(err => { if (/Unknown action/i.test(String(err.message))) return {}; throw err; }).then(() => { const m2 = document.getElementById("joinmsg"); if (m2) m2.innerHTML = `<div class="muted small">Connected. Syncing now…</div>`; syncNow().then(() => rerender()); })
         .catch(err => { const m2 = document.getElementById("joinmsg"); const offline = navigator.onLine === false || /Failed to fetch|NetworkError/i.test(String(err.message));
           if (m2) m2.innerHTML = offline ? `<div class="muted small">Saved – couldn't reach Google to check it just now (no signal?). It will keep trying and sync when it can.</div>` : `<div class="errline">${esc(/wrong key/i.test(err.message) ? "That code doesn't work any more – ask the owner for the current connection code." : err.message)}</div>`; });
     } catch(err){ if (m) m.innerHTML = `<div class="errline">${esc(err.message)}</div>`; } break; }

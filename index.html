@@ -58,6 +58,14 @@ button,input,select,textarea{font:inherit;color:inherit}
 .exrow:first-of-type{border-top:0}
 .exrow input,.exrow select{min-width:0;width:100%;font:inherit;font-size:16px;padding:9px 10px;border:1.5px solid var(--line);border-radius:10px;background:var(--field);color:inherit}
 .exrow .btn{justify-self:start}
+.rbrow{padding:10px 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+.rbrow:first-child{border-top:0}
+.rbrow.off{opacity:.5}
+.rbrow.low{background:var(--fail-bg);margin:0 -10px;padding:10px;border-radius:10px}
+.rbrow select,.rbrow input{font:inherit;font-size:16px;padding:8px 10px;border:1.5px solid var(--line);border-radius:10px;background:var(--field);color:inherit;min-width:0}
+.rbrow select{flex:1}
+.rbpos{font-family:var(--f-mono);min-width:1.6em;text-align:center}
+.readcard label.btn{cursor:pointer}
 ol.steps{margin:6px 0 8px;padding-left:20px;display:flex;flex-direction:column;gap:6px}
 .top h1{font-family:var(--f-display);font-weight:700;font-size:20px;margin:0;letter-spacing:.02em;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .top .sub{display:block;font-family:var(--f-body);font-weight:400;font-size:12px;opacity:.75;letter-spacing:0;overflow:hidden;text-overflow:ellipsis}
