@@ -40,6 +40,10 @@ const INSP = [
  ["8","Special locations",[["8.1","Bath or shower locations"],["8.2","Other special locations"],["8.3","EV charging equipment"],["8.4","Solar PV / battery storage"]]]
 ];
 const INSP_FLAT = INSP.flatMap(s => s[2]);
+const INSP_EV = ["9","EV charge point",[["9.1","Dedicated final circuit for the charge point"],["9.2","Earthing suitable – PME protection by an accepted method (e.g. open-PEN device, TT electrode)"],["9.3","RCD protection – Type A with 6 mA DC detection (RDC-DD) or Type B"],["9.4","Charge point IP and impact rating suitable for the location"],["9.5","Isolation and switching provided"],["9.6","Cable protected against damage and suitable for the route"],["9.7","DNO notified where required"],["9.8","Manufacturer's commissioning / load management checked"]]];
+const INSP_PV = ["10","Solar PV / battery storage",[["10.1","DC isolator(s) present, correctly rated and labelled"],["10.2","AC isolator present, lockable and labelled"],["10.3","Dual supply warning labels at origin, meter and consumer unit"],["10.4","Inverter RCD type compatible with manufacturer's instructions"],["10.5","DC cables suitable (PV cable), protected and routed correctly"],["10.6","Need for surge protection assessed"],["10.7","Array frame earthing / bonding as required"],["10.8","DNO notification (G98 / G99) completed"],["10.9","Battery installed to manufacturer's instructions (location, ventilation, fire separation)"]]];
+function inspSecs(job){ const w = (job && job.work) || {}; const s = INSP.slice(); if (w.ev === "Yes") s.push(INSP_EV); if (w.pv === "Yes") s.push(INSP_PV); return s; }
+function inspFlat(job){ return inspSecs(job).flatMap(x => x[2]); }
 
 /* ------------------------------------------------------------------ helpers */
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -59,12 +63,12 @@ function devShort(c){
 }
 
 /* ------------------------------------------------------------------ model */
-const DEFAULT_SETTINGS = { officeEmail:"office@blueforge-engineering.co.uk", sendUrl:"", sendKey:"", autoSend:"Yes", userName:"", role:"Inspector", signOffName:"Adam Fyles", lastSync:0, company:"BlueForge Engineering", inspector:"Adam Fyles", position:"Owner / Inspector", address:"Llandudno, North Wales", phone:"", email:"", reg:"", mft:"", irSerial:"", loopSerial:"", elecSerial:"" };
+const DEFAULT_SETTINGS = { numPrefix:"BF", labelModuleMm:"18", counters:{}, officeEmail:"office@blueforge-engineering.co.uk", sendUrl:"", sendKey:"", autoSend:"Yes", userName:"", role:"Inspector", signOffName:"Adam Fyles", lastSync:0, company:"BlueForge Engineering", inspector:"Adam Fyles", position:"Owner / Inspector", address:"Llandudno, North Wales", phone:"", email:"", reg:"", mft:"", irSerial:"", loopSerial:"", elecSerial:"" };
 let settings = { ...DEFAULT_SETTINGS };
 
 function newCircuit(no){ return { id:uid(), no:String(no), desc:"", wtype:"A", ref:"C", pts:"", live:"", cpc:"", ctype:"Final", dev:"", rating:"", ka:"6", rcd:"", rcdType:"", len:"", ring:"N", r1:"", rn:"", r2:"", r12:"", R2:"", irv:"500", irll:"", irle:"", pol:"", zs:"", rcdt:"", rcdt5:"", rcdbtn:"", afdd:"", remarks:"" }; }
-const TYPES = { EICR:"EICR", EIC:"EIC", MW:"Minor Works" };
-const TYPE_LONG = { EICR:"Electrical Installation Condition Report", EIC:"Electrical Installation Certificate", MW:"Minor Electrical Installation Works Certificate" };
+const TYPES = { EICR:"EICR", EIC:"EIC", MW:"Minor Works", PAT:"PAT" };
+const TYPE_LONG = { EICR:"Electrical Installation Condition Report", EIC:"Electrical Installation Certificate", MW:"Minor Electrical Installation Works Certificate", PAT:"Portable Appliance Test Register" };
 const typeOf = job => job.type || "EICR";
 const COMPANY_KEYS = ["company","inspector","position","address","phone","email","reg"];
 const companyCopy = () => { const o = {}; COMPANY_KEYS.forEach(k => o[k] = settings[k]); return o; };
@@ -83,6 +87,7 @@ function newJob(type = "EICR"){
     work:{ nature:"", desc:"", extent:"", maxDemand:"", departures:"", existing:"", notify:{}, bcRef:"", sameSigner:"Yes", designer:"", designDate:"", constructor:"", constructDate:"" } };
   if (type !== "EICR") { job.extent = ""; job.limitations = ""; job.reason = type === "EIC" ? "New installation work" : "Minor works"; }
   if (type === "MW") { job.boards[0].circuits.push(newCircuit(1)); }
+  if (type === "PAT") { job.boards = []; job.pat = { items: [] }; job.reason = "PAT testing"; }
   return job;
 }
 function normaliseJob(job){
@@ -90,6 +95,9 @@ function normaliseJob(job){
   if (!job.work) job.work = { nature:"", desc:"", extent:"", maxDemand:"", departures:"", existing:"", notify:{}, bcRef:"", sameSigner:"Yes", designer:"", designDate:"", constructor:"", constructDate:"" };
   if (!job.work.notify) job.work.notify = {};
   ensurePhotos(job);
+  if (!job.handover) job.handover = {};
+  if (!job.client) job.client = {};
+  if (typeOf(job) === "PAT" && !job.pat) job.pat = { items: [] };
   if (job.company) { const c = {}; COMPANY_KEYS.forEach(k => c[k] = job.company[k] ?? settings[k]); job.company = c; }
   Object.keys(job.insp || {}).forEach(k => { if (k.includes(".")) { job.insp[k.replace(".","_")] = job.insp[k]; delete job.insp[k]; } });
   return job;
@@ -233,14 +241,15 @@ function jobSummary(job){
   const started = job.obs.length || tested || Object.keys(job.insp).length;
   const linked = new Set(job.obs.map(o => o.src).filter(Boolean));
   const unwrittenFails = fails.filter(f => !linked.has(`circ:${f.b.id}:${f.c.id}`));
-  const coded = INSP_FLAT.filter(([id]) => ["C1","C2","C3","FI"].includes(job.insp[id.replace(".","_")]) && !linked.has("insp:"+id));
+  const coded = inspFlat(job).filter(([id]) => ["C1","C2","C3","FI"].includes(job.insp[id.replace(".","_")]) && !linked.has("insp:"+id));
   const years = (PREMISES.find(p => p[0] === job.premises) || [])[1];
   const interval = num(job.recInterval) ?? years ?? null;
   let nextDue = "";
   if (interval && job.inspDate){ const d = new Date(job.inspDate + "T12:00:00"); d.setMonth(d.getMonth() + Math.round(interval*12)); nextDue = d.toISOString().slice(0,10); }
   const type = typeOf(job);
+  if (type === "PAT") { const ps = patSummary(job); return { counts, fails: [], unwrittenFails: [], coded: [], inspFails: [], incomplete: [], tested: ps.pass + ps.fail, total: ps.total, untested: ps.none + ps.check, unsat: false, started: ps.total, years: null, interval: null, nextDue: "", status: ps.status, pat: ps }; }
   if (type !== "EICR") {
-    const inspFails = INSP_FLAT.filter(([id]) => job.insp[id.replace(".","_")] === "✗");
+    const inspFails = inspFlat(job).filter(([id]) => job.insp[id.replace(".","_")] === "✗");
     const untested = total - tested;
     const incomplete = [];
     job.boards.forEach(b => b.circuits.forEach(c => { const r = calcCircuit(job, b, c); if (r.result === "check") incomplete.push({b, c, why: r.checks.filter(x => x.s === "check").map(x => x.l + ": " + x.t).join("; ")}); }));
@@ -556,6 +565,7 @@ async function syncNow(){
         else if ((g.updated || 0) > (jobs[k].updated || 0)) { jobs[k] = g; changed = true; if (g.id === view.jobId) openChanged = true; }
       });
     }
+    await assignPendingNumbers();
     try { if (await syncPhotos()) syncAgain = true; }
     catch(e){ throw new Error("photos: " + String(e.message || e)); }
     settings.lastSync = Date.now();
@@ -580,6 +590,7 @@ async function initPhotoQueue(){ const recs = await photoAll(); recs.forEach(r =
 function photoKeys(){ return new Promise(res => { try { const st = photoTx("readonly"); if (!st) return res([]); const q = st.getAllKeys(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); } catch(e){ res([]); } }); }
 function ensurePhotos(job){ if (!job.photos) job.photos = { slots:{}, na:{}, other:[] }; if (!job.photos.slots) job.photos.slots = {}; if (!job.photos.na) job.photos.na = {}; if (!job.photos.other) job.photos.other = []; (job.obs || []).forEach(o => { if (!o.photos) o.photos = []; }); return job.photos; }
 function requiredSlots(job){
+  if (typeOf(job) === "PAT") return [];
   const s = [["supply","Supply head / cut-out"],["mainfuse","Main (supply) fuse"],["earthing","Earthing arrangement (main earthing terminal / conductor)"]];
   (job.boards || []).forEach(b => { s.push(["b:" + b.id + ":on", `${b.ref || "Board"} – cover on`]); s.push(["b:" + b.id + ":off", `${b.ref || "Board"} – cover off`]); });
   return s;
@@ -665,6 +676,7 @@ function thumbs(ids, target){
 }
 function tabPhotos(){
   const job = j(), p = ensurePhotos(job), miss = missingPhotos(job);
+  if (typeOf(job) === "PAT") return `<div class="card"><h2>Photos</h2><div class="muted small">Optional – e.g. failed items or labels. They print at the end of the register.</div>${thumbs(p.other, "other")}</div>`;
   const slot = ([k, l]) => `<div class="slot ${(p.slots[k] || []).length || String(p.na[k] || "").trim() ? "done" : ""}">
     <div class="row"><b>${esc(l)}</b><span class="spacer"></span>${(p.slots[k] || []).length ? pill("pass", (p.slots[k].length) + " photo" + (p.slots[k].length === 1 ? "" : "s")) : String(p.na[k] || "").trim() ? pill("none","Not photographed") : pill("check","Required")}</div>
     ${thumbs(p.slots[k], k)}
@@ -738,6 +750,350 @@ function photosSectionHtml(job, withObs){
   const obs = withObs ? job.obs.map((o, i) => photoHtml(o.photos, `Observation ${i + 1} (${o.code || "–"}): ${o.text.slice(0, 70)}`)).join("") : "";
   if (!req && !other && !obs) return "";
   return `<section style="break-before:page"><h2>Photographs</h2><div class="photos">${obs}${req}${other}</div></section>`;
+}
+
+/* ================================================================== batch 3: numbering, copying, labels, danger notice, handover, due list, PAT, EV/PV */
+
+/* ---------------- automatic numbering: PREFIX-TYPE-YEAR-NNN, shared across devices through the Google script */
+const NUM_CODE = { EICR:"EICR", EIC:"EIC", MW:"MW", PAT:"PAT" };
+function fmtNumber(type, year, n){ return `${settings.numPrefix || "BF"}-${NUM_CODE[type] || type}-${year}-${String(n).padStart(3, "0")}`; }
+async function assignNumber(job){
+  if (!job || job.example || job.reportNo) { if (job) job.numPending = false; return; }
+  const type = typeOf(job), year = String(job.inspDate || today()).slice(0, 4);
+  if (!settings.sendUrl) {
+    settings.counters = settings.counters || {};
+    const k = type + ":" + year; settings.counters[k] = (settings.counters[k] || 0) + 1;
+    job.reportNo = fmtNumber(type, year, settings.counters[k]); job.numPending = false; markDirty(job); return;
+  }
+  job.numPending = true;
+  if (navigator.onLine === false) return;
+  const pre = `${settings.numPrefix || "BF"}-${NUM_CODE[type] || type}-${year}-`;
+  const floor = Math.max(0, ...jobs.map(x => String(x.reportNo || "").startsWith(pre) ? parseInt(String(x.reportNo).slice(pre.length), 10) || 0 : 0));
+  try { const o = await api("nextNumber", { type: NUM_CODE[type] || type, year, prefix: settings.numPrefix || "BF", floor }); if (o.number && !job.reportNo) { job.reportNo = o.number; job.numPending = false; markDirty(job); if (view.jobId === job.id && !isEditing()) rerender(); } }
+  catch(e){ /* stays pending – assigned on the next sync */ }
+}
+async function assignPendingNumbers(){ for (const job of liveJobs().filter(x => x.numPending && !x.reportNo)) await assignNumber(job); }
+
+/* ---------------- copying jobs, boards */
+const DESIGN_KEYS = ["no","desc","wtype","ref","pts","live","cpc","ctype","dev","rating","ka","rcd","rcdType","len","ring","irv"];
+function copyBoard(b, n){
+  const nb = newBoard(n);
+  ["location","from","ocpd","phases","spd"].forEach(k => nb[k] = b[k]);
+  nb.ref = n ? "DB" + n : b.ref;
+  nb.circuits = (b.circuits || []).map(c => { const x = newCircuit(c.no); DESIGN_KEYS.forEach(k => x[k] = c[k]); return x; });
+  return nb;
+}
+const normAddr = a => String(a || "").toLowerCase().split("\n")[0].replace(/[^a-z0-9]/g, "");
+function sameAddressJobs(job){
+  const k = normAddr(job.address);
+  if (k.length < 6) return [];
+  return liveJobs().filter(x => x.id !== job.id && normAddr(x.address) === k && typeOf(x) !== "PAT").sort((a,b) => String(b.inspDate).localeCompare(String(a.inspDate)));
+}
+function copyFrom(dst, src){
+  dst.client = {...src.client}; dst.address = src.address; dst.occupier = src.occupier; dst.premises = src.premises;
+  if (typeOf(dst) === "EICR") { ["extent","limitations","wiringAge","records","recordsHeld"].forEach(k => dst[k] = src[k]); dst.lastInsp = src.inspDate; }
+  const keep = {...src.supply}; ["ze","ipf","ra","polarity","msRcdTime"].forEach(k => keep[k] = ""); dst.supply = keep;
+  dst.boards = src.boards.map((b, i) => { const nb = copyBoard(b, 0); nb.ref = b.ref; return nb; });
+  if (!dst.boards.length) dst.boards = [newBoard(1)];
+  dst.prevObs = (src.obs || []).map(o => ({text:o.text, code:o.code, loc:o.loc, reg:o.reg}));
+  dst.copiedFrom = { id: src.id, type: typeOf(src), date: src.inspDate, no: src.reportNo };
+  dst.work.ev = src.work && src.work.ev; dst.work.pv = src.work && src.work.pv;
+}
+function newJobFrom(src, type){
+  const nj = newJob(type);
+  copyFrom(nj, src);
+  if (type === "MW") { nj.boards = [nj.boards[0] || newBoard(1)]; nj.boards[0].circuits = [newCircuit(1)]; }
+  return nj;
+}
+function prevJobsCard(job){
+  if (job.example) return "";
+  const hasData = job.boards.some(b => b.circuits.some(c => c.desc || c.dev));
+  const prev = sameAddressJobs(job);
+  const reuse = typeOf(job) === "PAT" ? "" : `<div class="card"><h2>Re-use this job</h2><div class="muted small">Start a new job at this address with the same client, supply, boards and circuits – test results are cleared.</div>
+    <div class="row">${["EICR","EIC","MW"].map(t => `<button class="btn ghost sm" data-act="newFrom" data-type="${t}">New ${esc(TYPES[t])}</button>`).join("")}</div></div>`;
+  if (!prev.length || hasData || job.copiedFrom) return reuse;
+  return `<div class="card"><h2>Been here before</h2><div class="muted small">Copy the client, supply, boards and circuits from a previous job at this address. Test results aren't copied.</div>
+    ${prev.slice(0, 3).map(p => `<button class="card-link" data-act="copyFrom" data-id="${esc(p.id)}"><div class="grow"><div class="t">${esc(TYPES[typeOf(p)])} ${esc(ukDate(p.inspDate))}</div><div class="d">${esc(p.reportNo || "")} · ${p.boards.reduce((n,b) => n + b.circuits.length, 0)} circuits</div></div><span class="pill none">Copy</span></button>`).join("")}</div>` + reuse;
+}
+function prevObsCard(job){
+  if (!job.prevObs || !job.prevObs.length) return "";
+  return `<div class="card"><h2>Last report's observations <span class="count">${job.copiedFrom ? esc(ukDate(job.copiedFrom.date)) : ""}</span></h2>
+    <div class="muted small">Check each one on site. Tap <b>Still there</b> to add it to this report.</div>
+    ${job.prevObs.map((o, i) => `<div class="code-item"><div class="row"><span class="pill ${o.code === "C3" ? "none" : o.code === "FI" ? "check" : "fail"}">${esc(o.code || "–")}</span><span class="spacer"></span>${o.added ? pill("pass","Added") : `<button class="btn ghost sm" data-act="prevObs" data-i="${i}">Still there</button>`}</div><div class="small">${esc(o.text)}</div></div>`).join("")}</div>`;
+}
+
+/* ---------------- circuit chart + label strips (Brother P-touch, 180 dpi) */
+function circuitChartHtml(job, b){
+  const co = job.company || settings;
+  const rows = b.circuits.map(c => `<tr><td><b>${esc(c.no)}</b></td><td>${esc(c.desc)}</td><td>${esc(devShort(c))}</td><td>${c.rcd ? esc(c.rcd + " mA" + (c.rcdType ? " " + c.rcdType : "")) : ""}</td><td>${c.live ? esc(c.live + "/" + c.cpc + " mm²") : ""}</td><td>${esc(c.pts)}</td></tr>`).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Circuit chart – ${esc(b.ref)}</title>
+<style>@page{size:A4 portrait;margin:12mm}body{font-family:Arial,sans-serif;color:#0F1B2D;margin:0;padding:12px}h1{font-size:20px;margin:0 0 4px}p{margin:0 0 10px;font-size:12px;color:#444}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid #888;padding:6px;text-align:left}th{background:#1B365D;color:#fff}tr:nth-child(even) td{background:#F2F5F9}.foot{margin-top:10px;font-size:11px;color:#444}</style></head><body>
+<h1>Circuit chart – ${esc(b.ref)}${b.location ? " (" + esc(b.location) + ")" : ""}</h1><p>${esc(jobTitle(job))} · Supplied from ${esc(b.from || "origin")}${b.ocpd ? " · " + esc(b.ocpd) : ""}</p>
+<table><thead><tr><th>Cct</th><th>Description</th><th>Protective device</th><th>RCD</th><th>Cable</th><th>Points</th></tr></thead><tbody>${rows}</tbody></table>
+<div class="foot">${esc(co.company || "BlueForge Engineering")} · ${esc(co.phone || "")} · Tested ${esc(ukDate(b.date || job.inspDate))}${job.reportNo ? " · Ref " + esc(job.reportNo) : ""}</div></body></html>`;
+}
+function labelStripPng(b){
+  const dpmm = 180 / 25.4, mod = (num(settings.labelModuleMm) || 18) * dpmm, H = Math.round(18 * dpmm);
+  const cv = document.createElement("canvas"); cv.width = Math.max(1, Math.round(mod * b.circuits.length)); cv.height = H;
+  const x = cv.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0, 0, cv.width, H); x.fillStyle = "#000"; x.strokeStyle = "#000"; x.lineWidth = 2;
+  b.circuits.forEach((c, i) => {
+    const x0 = Math.round(i * mod); if (i) { x.beginPath(); x.moveTo(x0, 0); x.lineTo(x0, H); x.stroke(); }
+    x.textAlign = "center"; x.font = "bold 30px Arial"; x.fillText(String(c.no || i + 1), x0 + mod/2, 30);
+    x.font = "17px Arial";
+    const words = String(c.desc || "").split(/\s+/); let line = "", y = 54;
+    for (const w of words) { const t = line ? line + " " + w : w; if (x.measureText(t).width > mod - 8 && line) { x.fillText(line, x0 + mod/2, y); y += 18; line = w; if (y > H - 28) break; } else line = t; }
+    if (line && y <= H - 28) x.fillText(line, x0 + mod/2, y);
+    x.font = "bold 16px Arial"; x.fillText(devShort(c).replace(" MCB","").replace(" RCBO"," RCBO"), x0 + mod/2, H - 8);
+  });
+  return cv.toDataURL("image/png");
+}
+async function saveLabelStrip(job, b){
+  const data = labelStripPng(b), name = `Labels ${b.ref} ${jobTitle(job)}.png`.replace(/[\\/:*?"<>|]/g, "");
+  const bin = atob(data.split(",")[1]), arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  const blob = new Blob([arr], {type: "image/png"});
+  if (IOS || (navigator.canShare && navigator.canShare({files:[new File([blob], name, {type:"image/png"})]}))) {
+    try { await navigator.share({files:[new File([blob], name, {type:"image/png"})], title: name}); return; } catch(e){ if (e && e.name === "AbortError") return; }
+  }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+}
+function printHtml(html, returnTab){
+  if (IOS) {
+    try { if (persistTimer) { clearTimeout(persistTimer); writeNow(); } sessionStorage.setItem("bf-return", JSON.stringify({jobId: view.jobId, tab: returnTab || view.tab})); } catch(e){}
+    const bar = `<div id="bf-bar" style="position:sticky;top:0;z-index:9;display:flex;gap:8px;padding:10px 12px;padding-top:calc(10px + env(safe-area-inset-top,0px));background:#1B365D"><button onclick="location.reload()" style="flex:1;min-height:44px;border-radius:10px;border:1px solid #fff;background:transparent;color:#fff;font:600 16px Arial">‹ Back to app</button><button onclick="window.print()" style="flex:1;min-height:44px;border-radius:10px;border:0;background:#2E75B6;color:#fff;font:600 16px Arial">Print / PDF</button></div><style>@media print{#bf-bar{display:none!important}}</style>`;
+    document.open(); document.write(html.replace(/<body>/, "<body>" + bar)); document.close(); window.scrollTo(0, 0); return;
+  }
+  const w = window.open("", "_blank");
+  if (!w) { downloadFile("document.html", html, "text/html"); return; }
+  w.document.open(); w.document.write(html.replace("</body>", "<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script></body>")); w.document.close();
+}
+
+/* ---------------- signatures: any <canvas class="sig" data-sig="path" data-sigdate="path"> */
+function initSigs(){ document.querySelectorAll("canvas.sig[data-sig]").forEach(initSigCanvas); }
+function initSigCanvas(cv){
+  const job = j(); if (!job) return;
+  const [root, ...rest] = cv.dataset.sig.split("."); const obj = roots()[root]; const path = rest.join(".");
+  const dateBind = cv.dataset.sigdate ? cv.dataset.sigdate.split(".").slice(1).join(".") : "";
+  const dpr = window.devicePixelRatio || 1, rect = cv.getBoundingClientRect();
+  cv.width = Math.round(rect.width*dpr); cv.height = Math.round(rect.height*dpr);
+  const ctx = cv.getContext("2d");
+  ctx.scale(dpr, dpr); ctx.lineWidth = 2.2; ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--ink").trim() || "#000";
+  const cur = getPath(obj, path);
+  if (cur){ const img = new Image(); img.onload = () => ctx.drawImage(img, 0, 0, rect.width, rect.height); img.src = cur; }
+  let drawing = false, last = null;
+  const pt = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  cv.addEventListener("pointerdown", e => { clearTimeout(sigTimer); drawing = true; last = pt(e); cv.setPointerCapture(e.pointerId); e.preventDefault(); });
+  cv.addEventListener("pointermove", e => { if (!drawing) return; const p = pt(e); ctx.beginPath(); ctx.moveTo(last[0], last[1]); ctx.lineTo(p[0], p[1]); ctx.stroke(); last = p; });
+  const end = () => { if (!drawing) return; drawing = false;
+    const out = document.createElement("canvas"); out.width = cv.width; out.height = cv.height; const o = out.getContext("2d");
+    o.drawImage(cv, 0, 0); o.globalCompositeOperation = "source-in"; o.fillStyle = "#0F1B2D"; o.fillRect(0, 0, out.width, out.height);
+    setPath(obj, path, out.toDataURL("image/png"));
+    if (dateBind && !getPath(obj, dateBind)) setPath(obj, dateBind, today());
+    markDirty(job);
+    clearTimeout(sigTimer); sigTimer = setTimeout(() => { if (!isEditing()) rerender(); }, 1800); };
+  cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+}
+function sigPad(label, bind, dateBind){
+  return `<div class="field"><span>${esc(label)}</span><canvas class="sig" ${bind === "job.sig" ? 'id="sig"' : ""} data-sig="${bind}" data-sigdate="${dateBind || ""}" aria-label="Sign here with your finger"></canvas><div class="row"><span class="muted small">Sign with your finger</span><span class="spacer"></span><button class="btn ghost sm" data-act="clearSigPath" data-path="${bind}">Clear</button></div></div>`;
+}
+
+/* ---------------- customer handover signature (EIC / MW / PAT) */
+function handoverCard(job){
+  if (job.example || settings.role === "Tester") return "";
+  return `<div class="card"><h2>Customer handover</h2><div class="muted small">Optional – the customer signs to confirm they've received the ${typeOf(job) === "PAT" ? "register and been told about any failed items" : "certificate and been shown the installation"}.</div>
+    <div class="grid2">${field("Customer name","job.handover.name")}${field("Date","job.handover.date",{type:"date"})}</div>
+    ${sigPad("Customer signature","job.handover.sig","job.handover.date")}</div>`;
+}
+
+/* ---------------- C1 danger notice */
+function c1Obs(job){ return (job.obs || []).filter(o => o.code === "C1"); }
+function dangerCard(job){
+  if (typeOf(job) !== "EICR" || !c1Obs(job).length || job.example) return "";
+  const d = job.danger || {};
+  return `<div class="card"><h2>C1 danger notice</h2><div class="muted small">${c1Obs(job).length} C1 item${c1Obs(job).length === 1 ? "" : "s"} recorded. Give the customer a signed notice of what you found and what you did.</div>
+    <div class="row">${d.sig ? pill("pass","Customer signed") : pill("check","Not signed yet")}${d.sentAt ? pill("pass","Sent") : ""}<span class="spacer"></span><button class="btn sm" data-act="openDanger">Open notice</button></div></div>`;
+}
+function tabDanger(){
+  const job = j(); job.danger = job.danger || {};
+  const d = job.danger, items = c1Obs(job);
+  return `<div class="card"><h2>Danger present – C1</h2><div class="muted small">The items below were found to be dangerous during the inspection.</div>
+    ${items.map((o, i) => `<div class="code-item"><div class="row"><span class="pill fail">C1</span><span class="muted small">${esc(o.loc || "")}</span></div><div>${esc(o.text)}</div></div>`).join("")}</div>
+  <div class="card"><h2>What was done</h2>
+    ${chips("Action taken","job.danger.action",["Made safe – isolated / disconnected","Made safe – repaired","Customer refused permission to make safe","Other"],{small:true})}
+    ${field("Details","job.danger.details",{area:true,ph:"e.g. Circuit 5 isolated at the consumer unit and labelled. Do not use until repaired."})}</div>
+  <div class="card"><h2>Customer</h2>
+    <div class="grid2">${field("Name","job.danger.name")}${field("Email (for their copy)","job.danger.email",{type:"email"})}</div>
+    ${sigPad("Customer signature","job.danger.sig","job.danger.date")}
+    ${field("Date","job.danger.date",{type:"date"})}
+    <div class="muted small">By signing, the customer confirms they've been told about the danger and the action taken.</div></div>
+  <div class="card"><h2>Send</h2>
+    <button class="btn block" data-act="sendDanger" ${settings.sendUrl ? "" : "disabled"}>Email notice to customer and office</button>
+    ${settings.sendUrl ? `<div class="muted small">${d.sentAt ? "Sent " + esc(agoText(d.sentAt)) + ". " : ""}Goes to ${esc(d.email || "the customer (add their email)")} and ${esc(settings.officeEmail)}.</div>` : `<div class="muted small">Set up sync in ⚙ to email it. You can still print it below.</div>`}
+    <div id="dangermsg"></div>
+    <button class="btn block ghost" data-act="printDanger">Print / save as PDF</button>
+    <button class="btn ghost sm" data-act="backToReport">Back to report</button></div>`;
+}
+function dangerHtml(job){
+  const d = job.danger || {}, co = job.company || settings;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Danger notice – ${esc(jobTitle(job))}</title>
+<style>@page{size:A4;margin:14mm}body{font-family:Arial,sans-serif;color:#0F1B2D;margin:0;padding:14px;font-size:13px}.band{background:#B42318;color:#fff;padding:12px 14px}.band b{display:block;font-size:22px;letter-spacing:.05em}
+table{border-collapse:collapse;width:100%;margin-top:10px}th,td{border:1px solid #999;padding:6px;text-align:left;vertical-align:top}th{background:#FDE2DF;width:28%}h2{font-size:14px;margin:16px 0 4px}.sig img{max-height:60px}</style></head><body>
+<div class="band"><b>DANGER NOTICE – C1</b>Electrical installation: danger present, immediate action required</div>
+<p>${esc(co.company || "BlueForge Engineering")} · ${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</p>
+<table><tr><th>Installation address</th><td>${esc(job.address)}</td></tr><tr><th>Report reference</th><td>${esc(job.reportNo || "")}</td></tr><tr><th>Date of inspection</th><td>${esc(ukDate(job.inspDate))}</td></tr><tr><th>Inspector</th><td>${esc(job.inspector)}</td></tr></table>
+<h2>Dangerous conditions found</h2><table>${c1Obs(job).map((o, i) => `<tr><th>C1 – ${i + 1}${o.loc ? "<br>" + esc(o.loc) : ""}</th><td>${esc(o.text)}</td></tr>`).join("")}</table>
+<h2>Action taken</h2><table><tr><th>Action</th><td>${esc(d.action || "")}</td></tr><tr><th>Details</th><td>${esc(d.details || "")}</td></tr></table>
+<p>These conditions present a risk of electric shock or fire. Do not use the affected parts of the installation until a competent person has put them right. If you have refused permission for them to be made safe, the responsibility for any consequences rests with you.</p>
+<h2>Customer acknowledgement</h2><table><tr><th>Name</th><td>${esc(d.name || "")}</td></tr><tr><th>Signature</th><td class="sig">${d.sig ? `<img src="${d.sig}" alt="">` : ""}</td></tr><tr><th>Date</th><td>${esc(ukDate(d.date))}</td></tr></table>
+${photosSectionHtml({...job, photos:{slots:{}, na:{}, other:[]}, obs: c1Obs(job), boards:[]}, true)}
+</body></html>`;
+}
+async function sendDanger(){
+  const job = j(), d = job.danger || {}, m = document.getElementById("dangermsg");
+  await loadJobPhotos(job);
+  try {
+    if (m) m.innerHTML = `<div class="muted small">Sending…</div>`;
+    const html = dangerHtml(job), base = `Danger notice ${jobTitle(job)} ${ukDate(job.inspDate).replace(/\//g,"-")}`.replace(/[\\/:*?"<>|]/g, "");
+    await api("send", { to: d.email || settings.officeEmail, cc: d.email ? settings.officeEmail : "", subject: `DANGER NOTICE (C1) – ${jobTitle(job)} – ${ukDate(job.inspDate)}`,
+      body: `<p>Please find attached the danger notice for ${esc(job.address)} following the electrical inspection on ${esc(ukDate(job.inspDate))}.</p><p>${esc((job.company || settings).company)}</p>`,
+      reportHtml: html, reportName: base + ".html", pdfName: base + ".pdf", backup: "{}", backupName: "danger.json" });
+    d.sentAt = Date.now(); job.danger = d; markDirty(job);
+    if (m) m.innerHTML = `<div class="muted small">Sent.</div>`;
+  } catch(e){ if (m) m.innerHTML = `<div class="errline">Couldn't send: ${esc(e.message || e)}</div>`; }
+}
+
+/* ---------------- re-inspections due */
+function dueList(){
+  const byAddr = new Map();
+  liveJobs().filter(x => ["EICR","EIC"].includes(typeOf(x)) && x.address).forEach(x => { const k = normAddr(x.address); const cur = byAddr.get(k); if (!cur || String(x.inspDate) > String(cur.inspDate)) byAddr.set(k, x); });
+  const soon = new Date(); soon.setMonth(soon.getMonth() + 3); const lim = soon.toISOString().slice(0, 10);
+  return [...byAddr.values()].map(x => ({job: x, due: jobSummary(x).nextDue})).filter(x => x.due && x.due <= lim).sort((a,b) => a.due.localeCompare(b.due));
+}
+function renderDue(){
+  const list = dueList(), t = today();
+  return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Re-inspections due<span class="sub">Overdue or due in the next 3 months</span></h1></header>
+  <main>${list.length ? list.map(({job, due}) => { const c = job.client || {}; const over = due < t;
+    const msg = encodeURIComponent(`Hello${c.name ? " " + c.name.split(" ")[0] : ""},\n\nThe electrical installation at ${jobTitle(job)} is due its next periodic inspection (EICR) by ${ukDate(due)}. Would you like us to book it in?\n\nKind regards,\n${settings.userName || settings.inspector}\n${settings.company}${settings.phone ? "\n" + settings.phone : ""}`);
+    return `<div class="card"><div class="row"><b style="flex:1;min-width:0">${esc(jobTitle(job))}</b>${over ? pill("fail","Overdue " + ukDate(due)) : pill("check","Due " + ukDate(due))}</div>
+      <div class="small muted">${esc(c.name || "No client name")} · last ${esc(TYPES[typeOf(job)])} ${esc(ukDate(job.inspDate))}${job.contactedAt ? " · contacted " + esc(agoText(job.contactedAt)) : ""}</div>
+      <div class="row">${c.phone ? `<a class="btn ghost sm" href="tel:${esc(c.phone.replace(/\s/g, ""))}">Call</a>` : ""}${c.email ? `<a class="btn ghost sm" href="mailto:${esc(c.email)}?subject=${encodeURIComponent("Electrical inspection due – " + jobTitle(job))}&body=${msg}">Email</a>` : ""}
+        <button class="btn ghost sm" data-act="contacted" data-id="${esc(job.id)}">${job.contactedAt ? "Contacted ✓" : "Mark contacted"}</button>
+        <button class="btn sm" data-act="reinspect" data-id="${esc(job.id)}">Start EICR</button></div>
+      ${!c.phone && !c.email ? `<div class="muted small">No phone or email saved for this client.</div>` : ""}</div>`; }).join("")
+    : `<div class="empty">Nothing due in the next 3 months.</div>`}
+    <div class="muted small">Based on the most recent EICR or EIC at each address and its recommended interval.</div></main>`;
+}
+
+/* ---------------- EV / PV details */
+function evPvCard(job){
+  const w = job.work;
+  return `<div class="card"><h2>EV charging &amp; solar</h2>
+    <div class="grid2">${chips("Includes an EV charge point","job.work.ev",["Yes","No"],{small:true})}${chips("Includes solar PV / battery","job.work.pv",["Yes","No"],{small:true})}</div>
+    ${w.ev === "Yes" ? `<div class="grid2">${field("Charge point make / model","job.ev.model")}${field("Rating","job.ev.kw",{num:true,unit:"kW"})}</div>
+      ${chips("EV earthing method","job.ev.earthing",["PME + open-PEN device (built in)","PME + separate open-PEN device","TT electrode","TN-S","Other"],{small:true})}` : ""}
+    ${w.pv === "Yes" ? `<div class="grid2">${field("Inverter make / model","job.pv.inverter")}${field("Array size","job.pv.kwp",{num:true,unit:"kWp"})}</div>
+      <div class="grid2">${field("Battery make / model","job.pv.battery")}${chips("DNO notification","job.pv.dno",["G98","G99","Pending"],{small:true})}</div>` : ""}
+    ${w.ev === "Yes" || w.pv === "Yes" ? `<div class="muted small">Extra checklist items are added to the Inspect tab.</div>` : ""}</div>`;
+}
+function pvStringsCard(job){
+  if (!job.work || job.work.pv !== "Yes") return "";
+  job.pv = job.pv || {}; job.pv.strings = job.pv.strings || [];
+  return `<div class="card"><h2>PV string tests</h2>
+    ${job.pv.strings.map((st, i) => `<div class="obs"><div class="row"><b>String ${i + 1}</b><span class="spacer"></span><button class="btn ghost sm" data-act="delString" data-i="${i}">Remove</button></div>
+      <div class="grid2">${field("Voc","job.pv.strings." + i + ".voc",{num:true,unit:"V"})}${field("Isc","job.pv.strings." + i + ".isc",{num:true,unit:"A"})}</div>
+      <div class="grid2">${field("IR +ve to earth","job.pv.strings." + i + ".irp",{num:true,unit:"MΩ"})}${field("IR −ve to earth","job.pv.strings." + i + ".irn",{num:true,unit:"MΩ"})}</div>
+      ${chips("Polarity","job.pv.strings." + i + ".pol",["✓","✗"],{small:true})}</div>`).join("")}
+    <button class="btn ghost sm" data-act="addString">+ Add string</button></div>`;
+}
+function evPvExportHtml(job){
+  const w = job.work || {}, ev = job.ev || {}, pv = job.pv || {};
+  if (w.ev !== "Yes" && w.pv !== "Yes") return "";
+  const r = (l, v) => `<tr><th>${esc(l)}</th><td>${esc(v || "")}</td></tr>`;
+  return `<h2>EV charging and solar PV / battery</h2><table class="kv"><tbody>${w.ev === "Yes" ? r("EV charge point", [ev.model, ev.kw && ev.kw + " kW"].filter(Boolean).join(" · ")) + r("EV earthing method", ev.earthing) : ""}${w.pv === "Yes" ? r("Inverter", pv.inverter) + r("Array", pv.kwp && pv.kwp + " kWp") + r("Battery", pv.battery) + r("DNO notification", pv.dno) : ""}</tbody></table>
+  ${(pv.strings || []).length ? `<table class="sched"><thead><tr><th>String</th><th>Voc (V)</th><th>Isc (A)</th><th>IR +ve (MΩ)</th><th>IR −ve (MΩ)</th><th>Polarity</th></tr></thead><tbody>${pv.strings.map((st, i) => `<tr><td>${i + 1}</td><td>${esc(st.voc)}</td><td>${esc(st.isc)}</td><td>${esc(st.irp)}</td><td>${esc(st.irn)}</td><td>${esc(st.pol)}</td></tr>`).join("")}</tbody></table>` : ""}`;
+}
+
+/* ---------------- PAT testing */
+const FLEX_RES = {"0.5":39, "0.75":26, "1":19.5, "1.25":16, "1.5":13, "2.5":8};
+function newPatItem(no){ return { id:uid(), no:String(no), desc:"", location:"", cls:"I", kind:"Portable", visual:"", fuse:"13", len:"", csa:"0.75", rpe:"", irv:"500", ir:"", leak:"", pol:"", interval:"12", notes:"" }; }
+function calcPat(job, it){
+  const checks = [];
+  const rpe = num(it.rpe), ir = num(it.ir), leak = num(it.leak), len = num(it.len);
+  const rpeLim = r2(0.1 + (len !== null && FLEX_RES[it.csa] ? len * FLEX_RES[it.csa] / 1000 : 0));
+  const irMin = it.cls === "II" ? 2 : it.cls === "III" ? 0.25 : 1;
+  const leakLim = it.cls === "II" ? 0.25 : ["Stationary","IT equipment"].includes(it.kind) ? 3.5 : 0.75;
+  if (it.visual === "✗") checks.push({l:"Visual", s:"fail", t:"Failed visual inspection"});
+  if (it.cls === "I" && rpe !== null) checks.push({l:"Earth continuity", s: rpe <= rpeLim ? "pass" : "fail", t:`${rpe} Ω (max ${rpeLim.toFixed(2)} Ω${len === null ? " – add cord length for an exact limit" : ""})`});
+  if (ir !== null) checks.push({l:"Insulation", s: ir >= irMin ? "pass" : "fail", t:`${String(it.ir).includes(">") ? it.ir : ir} MΩ (min ${irMin} MΩ)`});
+  if (leak !== null) checks.push({l:"Leakage", s: leak <= leakLim ? "pass" : "fail", t:`${leak} mA (max ${leakLim} mA)`});
+  if (it.pol === "✗") checks.push({l:"Polarity", s:"fail", t:"Incorrect polarity"});
+  const tested = !!it.visual || rpe !== null || ir !== null || leak !== null;
+  const missing = [];
+  if (tested) { if (!it.visual) missing.push("visual"); if (it.cls === "I" && rpe === null) missing.push("earth continuity"); if (it.cls !== "III" && ir === null && leak === null) missing.push("insulation or leakage"); if (it.kind === "Extension lead" && !it.pol) missing.push("polarity"); }
+  if (missing.length) checks.push({l:"Not recorded", s:"check", t: missing.join(", ")});
+  const result = checks.some(c => c.s === "fail") ? "fail" : !tested ? "none" : checks.some(c => c.s === "check") ? "check" : "pass";
+  let next = "";
+  if (job.inspDate && num(it.interval)) { const d = new Date(job.inspDate + "T12:00:00"); d.setMonth(d.getMonth() + num(it.interval)); next = d.toISOString().slice(0, 10); }
+  return { checks, result, rpeLim, irMin, leakLim, next };
+}
+function patSummary(job){
+  const items = (job.pat && job.pat.items) || [];
+  const r = items.map(it => calcPat(job, it).result);
+  const pass = r.filter(x => x === "pass").length, fail = r.filter(x => x === "fail").length, none = r.filter(x => x === "none").length, check = r.filter(x => x === "check").length;
+  return { total: items.length, pass, fail, none, check, status: !items.length || none || check ? "none" : "pass" };
+}
+function tabPat(){
+  const job = j(); job.pat = job.pat || {items:[]};
+  const s = patSummary(job);
+  return `<div class="card"><h2>Items <span class="count">${s.pass} pass · ${s.fail} fail · ${s.none + s.check} to do</span></h2>
+    ${job.pat.items.length ? `<div style="display:flex;flex-direction:column;gap:8px">${job.pat.items.map(it => { const r = calcPat(job, it);
+      return `<button class="card-link" data-act="patItem" data-id="${esc(it.id)}"><span class="cno">${esc(it.no)}</span><div class="grow"><div class="t">${esc(it.desc || "Item " + it.no)}</div><div class="d">Class ${esc(it.cls)} · ${esc(it.kind)}${it.location ? " · " + esc(it.location) : ""}</div></div>${resultPill(r.result)}</button>`; }).join("")}</div>` : `<div class="empty">No items yet.</div>`}
+    ${job.example ? "" : `<button class="btn block" data-act="addPat">+ Add item</button>`}</div>
+  <div class="card"><h2>Limits used</h2><div class="muted small">Earth continuity ≤ 0.1 Ω + cord resistance · Insulation ≥ 1 MΩ Class I, ≥ 2 MΩ Class II · Leakage ≤ 0.75 mA portable Class I, 3.5 mA stationary / IT, 0.25 mA Class II. Based on the IET Code of Practice for In-service Inspection and Testing – check against your copy.</div></div>`;
+}
+function renderPatItem(){
+  const job = j(), items = job.pat.items, it = items.find(x => x.id === view.patItem), idx = items.indexOf(it), r = calcPat(job, it);
+  const bind = k => "job.pat.items." + idx + "." + k;
+  return `<header class="top"><button class="iconbtn" data-act="patBack" aria-label="Back to items">←</button><h1>Item ${esc(it.no)}<span class="sub">${esc(it.desc || "No description")}</span></h1>
+    <button class="iconbtn" data-act="patNext" aria-label="Next item">${idx >= items.length - 1 ? "+" : "›"}</button></header>
+  ${statusHtml()}
+  <main><div class="row"><span class="muted small">Result</span>${resultPill(r.result)}</div>
+    <div class="card"><h2>Item</h2><div class="grid2">${field("Item no. / asset ID", bind("no"))}${field("Location", bind("location"))}</div>
+      ${field("Description", bind("desc"), {ph:"e.g. Kettle – Russell Hobbs"})}
+      ${chips("Class", bind("cls"), ["I","II","III"])}
+      ${chips("Type", bind("kind"), ["Portable","Handheld","Stationary","IT equipment","Extension lead"], {small:true})}
+      <div class="grid2">${field("Fuse", bind("fuse"), {num:true,unit:"A"})}${chips("Retest (months)", bind("interval"), ["3","6","12","24","48"], {small:true})}</div></div>
+    <div class="card"><h2>Tests</h2>
+      ${chips("Visual inspection", bind("visual"), ["✓","✗"])}
+      ${it.cls === "I" ? `<div class="grid2">${field("Cord length", bind("len"), {num:true,unit:"m"})}${chips("Cord csa (mm²)", bind("csa"), Object.keys(FLEX_RES), {small:true})}</div>${field("Earth continuity", bind("rpe"), {num:true,unit:"Ω",hint:"Limit " + r.rpeLim.toFixed(2) + " Ω"})}` : ""}
+      ${it.cls !== "III" ? `${chips("IR test voltage (V)", bind("irv"), ["250","500"], {small:true})}${field("Insulation resistance", bind("ir"), {num:true,unit:"MΩ",hint:"Min " + r.irMin + " MΩ",extra:`<button type="button" class="chip small" data-quick="${bind("ir")}" data-val=">999">>999</button>`})}` : ""}
+      ${field("Leakage / touch current (optional)", bind("leak"), {num:true,unit:"mA",hint:"Max " + r.leakLim + " mA"})}
+      ${chips("Polarity (leads)", bind("pol"), ["✓","✗","N/A"], {small:true})}
+      ${field("Notes", bind("notes"), {area:true})}</div>
+    <div class="card"><h2>Results</h2>${r.checks.length ? `<div class="checks">${r.checks.map(x => `<div class="chk ${x.s}"><div class="l">${esc(x.l)}</div><div class="x">${esc(x.t)}</div></div>`).join("")}</div>` : `<div class="muted small">Results appear as you enter tests.</div>`}
+      ${r.next ? `<div class="muted small">Next test due ${esc(ukDate(r.next))}</div>` : ""}</div>
+    ${job.example ? "" : view.confirmDel === "pat" ? `<div class="row"><span class="small">Delete this item?</span><button class="btn danger sm" data-act="delPat">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<div class="row"><button class="btn ghost sm" data-act="dupPat">Copy to new item</button><span class="spacer"></span><button class="btn danger sm" data-act="askDel" data-what="pat">Delete</button></div>`}
+    <div class="row"><button class="btn ghost" data-act="patBack">Done</button><span class="spacer"></span><button class="btn" data-act="patNext">${idx >= items.length - 1 ? "+ Next item" : "Next item ›"}</button></div></main>`;
+}
+function patWorkTab(){
+  const job = j();
+  return `<div class="card"><h2>PAT register</h2><div class="grid2">${field("Register number","job.reportNo")}${field("Test date","job.inspDate",{type:"date"})}</div></div>
+  <div class="card"><h2>Client &amp; site</h2>${field("Client","job.client.name")}<div class="grid2">${field("Telephone","job.client.phone",{type:"tel"})}${field("Email","job.client.email",{type:"email"})}</div>${field("Site address","job.address",{area:true})}</div>
+  <div class="card"><h2>Instrument</h2><div class="grid2">${field("PAT tester (make / serial)","job.patTester")}${field("Calibration due","job.patCal",{type:"date"})}</div></div>`;
+}
+function exportPat(job){
+  const co = job.company || settings, s = patSummary(job), items = (job.pat && job.pat.items) || [];
+  const rows = items.map(it => { const r = calcPat(job, it); return `<tr class="${r.result}"><td>${esc(it.no)}</td><td>${esc(it.desc)}</td><td>${esc(it.location)}</td><td>${esc(it.cls)}</td><td>${esc(it.kind)}</td><td>${esc(it.fuse)}</td><td>${esc(it.visual)}</td><td>${esc(it.rpe)}</td><td>${esc(it.ir)}</td><td>${esc(it.leak)}</td><td>${esc(it.pol)}</td><td>${{pass:"PASS",fail:"FAIL",check:"CHECK",none:""}[r.result]}</td><td>${esc(ukDate(r.next))}</td><td>${esc(it.notes)}</td></tr>`; }).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PAT register – ${esc(jobTitle(job))}</title><style>${REPORT_CSS}</style></head><body>
+<div class="band"><b>${esc(co.company || "BlueForge Engineering")}</b><span>${esc([co.address, co.phone, co.email].filter(Boolean).join(" · "))}</span></div>
+<div class="sub">Portable Appliance Test Register – in-service inspection and testing of electrical equipment</div>
+<table class="kv"><tbody><tr><th>Register number</th><td>${esc(job.reportNo)}</td><th>Test date</th><td>${esc(ukDate(job.inspDate))}</td></tr><tr><th>Client</th><td>${esc(job.client.name)}</td><th>Site</th><td>${esc(job.address)}</td></tr><tr><th>Instrument</th><td>${esc(job.patTester || "")}</td><th>Calibration due</th><td>${esc(ukDate(job.patCal))}</td></tr><tr><th>Items tested</th><td>${s.total}</td><th>Passed / failed</th><td>${s.pass} / ${s.fail}</td></tr></tbody></table>
+<section class="wide"><h2>Register</h2><table class="sched"><thead><tr>${["No","Description","Location","Class","Type","Fuse","Visual","Earth (Ω)","IR (MΩ)","Leak (mA)","Pol","Result","Next due","Notes"].map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>
+<p class="note">Failed items must be withdrawn from use and labelled until repaired or replaced.</p></section>
+<h2>Declaration</h2><table class="kv"><tbody><tr><th>Tested by</th><td>${esc(job.inspector)}</td><th>Date</th><td>${esc(ukDate(job.sigDate))}</td></tr><tr><th>Signature</th><td class="sig" colspan="3">${job.sig ? `<img src="${job.sig}" alt="">` : ""}</td></tr>${job.handover && job.handover.name ? `<tr><th>Received by</th><td>${esc(job.handover.name)}</td><th>Signature</th><td class="sig">${job.handover.sig ? `<img src="${job.handover.sig}" alt="">` : ""}</td></tr>` : ""}</tbody></table>
+${photosSectionHtml(job, false)}
+<footer>${esc(co.company || "BlueForge Engineering")} – PAT register ${esc(job.reportNo || "")} – ${esc(job.address || "")}</footer></body></html>`;
 }
 
 /* ------------------------------------------------------------------ sending to the office */
@@ -871,6 +1227,14 @@ function doPost(e) {
       (d.ids || []).forEach(function (id) { var f = file_(data2, id + ".json"); if (f) out.push(JSON.parse(f.getBlob().getDataAsString())); });
       return reply({ok: true, jobs: out});
     }
+    if (action === "nextNumber") {
+      var lk = LockService.getScriptLock(); lk.waitLock(25000);
+      try {
+        var props = PropertiesService.getScriptProperties(), nk = "num:" + d.type + ":" + d.year;
+        var n = Math.max(Number(props.getProperty(nk) || 0), Number(d.floor || 0)) + 1; props.setProperty(nk, String(n));
+        return reply({ok: true, number: (d.prefix || "BF") + "-" + d.type + "-" + d.year + "-" + ("00" + n).slice(-3)});
+      } finally { lk.releaseLock(); }
+    }
     if (action === "putPhoto") {
       if (!/^[a-z0-9]+$/i.test(d.id || "")) return reply({ok: false, error: "Bad photo id"});
       var photos = sub_("Photos"), name = d.id + ".jpg";
@@ -895,7 +1259,9 @@ function doPost(e) {
       var html = Utilities.newBlob(d.reportHtml, "text/html", d.reportName);
       files.push(html);
       files.push(Utilities.newBlob(d.backup, "application/json", d.backupName));
-      MailApp.sendEmail({to: d.to || OFFICE, subject: d.subject, htmlBody: d.body, attachments: files, name: "BlueForge EICR"});
+      var mail = {to: d.to || OFFICE, subject: d.subject, htmlBody: d.body, attachments: files, name: "BlueForge EICR"};
+      if (d.cc) mail.cc = d.cc;
+      MailApp.sendEmail(mail);
       var certs = sub_("Certificates");
       if (pdf) replace_(certs, d.pdfName, pdf); else replace_(certs, d.reportName, html);
       return reply({ok: true});
@@ -964,6 +1330,7 @@ const icon = n => ({
   supply:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>',
   circuits:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8v4M11 8v4M15 8v4M7 16h10"/></svg>',
   inspect:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h10M4 12h10M4 18h10"/><path d="m16 6 2 2 3-4M16 18l2 2 3-4"/></svg>',
+  pat:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3v5M15 3v5M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v3"/></svg>',
   photos:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
   cert:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16"/><path d="M14.5 4.5l5 5L9 20H4v-5z"/></svg>',
   report:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 3 20h18z"/><path d="M12 10v4M12 17v.5"/></svg>'
@@ -1015,10 +1382,11 @@ function render(){
   else if (view.screen === "settings") html = renderSettings();
   else if (view.screen === "book") html = renderBook();
   else if (view.screen === "codes") html = renderCodes();
+  else if (view.screen === "due") html = renderDue();
   else if (view.screen === "job") { if (curJob() && !curJob().deleted) html = renderJob(); else { view = {screen:"home", tab:"job", board:0, circ:null}; html = renderHome(); } }
   app.innerHTML = html;
   renderTabs();
-  initSig();
+  initSigs();
   if (typeof renderVoice === "function") { if (!(view.screen === "job" && view.tab === "circuits" && curCirc()) && voice.mode === "readings" && voice.state !== "listening") voice.state = "idle"; renderVoice(); }
   if (view.keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
   view.keepScroll = false;
@@ -1028,15 +1396,17 @@ function rerender(){ view.keepScroll = true; render(); }
 function jobPill(j){
   const s = jobSummary(j), t = typeOf(j);
   if (j.handoff && !j.sig && settings.role !== "Tester") return pill("check","Ready to sign");
+  if (t === "PAT") return s.total ? pill(s.pat.fail ? "fail" : s.status === "pass" ? "pass" : "none", `${s.pat.pass} pass · ${s.pat.fail} fail`) : pill("none","In progress");
   if (t === "EICR") return s.status === "fail" ? pill("fail","UNSATISFACTORY") : s.status === "pass" && s.tested ? pill("pass","SATISFACTORY") : pill("none","In progress");
   return s.status === "fail" ? pill("fail","TEST FAILURES") : s.status === "pass" ? pill("pass","ALL PASSED") : pill("none","In progress");
 }
 function jobCard(j){
-  const circ = j.boards.reduce((n,b) => n + b.circuits.length, 0);
+  const circ = typeOf(j) === "PAT" ? ((j.pat && j.pat.items) || []).length : j.boards.reduce((n,b) => n + b.circuits.length, 0);
+  const unit = typeOf(j) === "PAT" ? "item" : "circuit";
   const extra = [];
   if (!j.example && (j.sentAt || j.sendQueued)) extra.push(sendStatus(j));
   if (j.handoff && settings.role === "Tester") extra.push(pill("none", "Sent for sign-off"));
-  return `<button class="card-link" data-act="open" data-id="${esc(j.id)}"><div class="grow"><div class="t">${esc(jobTitle(j))}</div><div class="d"><span class="typetag">${esc(TYPES[typeOf(j)])}</span> ${esc(ukDate(j.inspDate))}${j.reportNo ? " · " + esc(j.reportNo) : ""} · ${circ} circuit${circ === 1 ? "" : "s"}${j.example ? ' · <span class="ex-tag">Example</span>' : ""}</div>${extra.length ? `<span class="row" style="gap:6px;margin-top:4px">${extra.join("")}</span>` : ""}</div>${jobPill(j)}</button>`;
+  return `<button class="card-link" data-act="open" data-id="${esc(j.id)}"><div class="grow"><div class="t">${esc(jobTitle(j))}</div><div class="d"><span class="typetag">${esc(TYPES[typeOf(j)])}</span> ${esc(ukDate(j.inspDate))}${j.reportNo ? " · " + esc(j.reportNo) : ""} · ${circ} ${unit}${circ === 1 ? "" : "s"}${j.example ? ' · <span class="ex-tag">Example</span>' : ""}</div>${extra.length ? `<span class="row" style="gap:6px;margin-top:4px">${extra.join("")}</span>` : ""}</div>${jobPill(j)}</button>`;
 }
 function homeList(){
   const q = (view.homeQ || "").toLowerCase().trim();
@@ -1055,11 +1425,13 @@ function renderHome(){
       <button class="card-link" data-act="newType" data-type="EICR"><div class="grow"><div class="t">EICR</div><div class="d">Condition report on an existing installation</div></div></button>
       <button class="card-link" data-act="newType" data-type="EIC"><div class="grow"><div class="t">EIC</div><div class="d">New installation, new circuits, consumer unit change</div></div></button>
       <button class="card-link" data-act="newType" data-type="MW"><div class="grow"><div class="t">Minor Works</div><div class="d">Addition or alteration that doesn't add a new circuit</div></div></button>
+      <button class="card-link" data-act="newType" data-type="PAT"><div class="grow"><div class="t">PAT register</div><div class="d">Portable appliance testing</div></div></button>
       <button class="btn ghost sm" data-act="chooserOff">Cancel</button></div>`
       : `<button class="btn block" data-act="chooser">+ New</button>`}
     <div class="tiles">
       <button class="tile" data-act="book"><b>Handbook</b><span>Tables, test methods, calculators</span></button>
       <button class="tile" data-act="codes"><b>Coding guide</b><span>Search C1 · C2 · C3 · FI</span></button>
+      <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} re-inspection${dueList().length === 1 ? "" : "s"} to chase</span></button>
     </div>
     ${ready ? `<div class="warnline">${ready} job${ready === 1 ? "" : "s"} ready for your sign-off.</div>` : ""}
     <div class="card"><h2>Your jobs <span class="count">${liveJobs().length}</span></h2>
@@ -1117,6 +1489,7 @@ function renderSettings(){
       ${field("Address","settings.address",{area:true})}
       <div class="grid2">${field("Telephone","settings.phone",{type:"tel"})}${field("Email","settings.email",{type:"email"})}</div>
       ${field("Registration / scheme no.","settings.reg",{ph:"Leave blank if not registered"})}
+      <div class="grid2">${field("Certificate number prefix","settings.numPrefix",{ph:"BF",hint:"Numbers look like BF-EICR-2026-001"})}${field("Breaker width for labels","settings.labelModuleMm",{num:true,unit:"mm",ph:"18"})}</div>
     </div>
     <div class="card"><h2>Test instruments</h2><div class="muted small">Filled in automatically on each new board.</div>
       ${field("Multifunction tester (make / serial)","settings.mft")}${field("Insulation resistance tester serial","settings.irSerial",{ph:"e.g. As MFT"})}
@@ -1135,15 +1508,17 @@ function renderSettings(){
 const TABS = {
   EICR: [["job","Job"],["supply","Supply"],["circuits","Circuits"],["inspect","Inspect"],["photos","Photos"],["report","Report"]],
   EIC:  [["job","Work"],["supply","Supply"],["circuits","Circuits"],["inspect","Inspect"],["photos","Photos"],["cert","Certify"]],
-  MW:   [["job","Work"],["supply","Supply"],["circuits","Circuit"],["photos","Photos"],["cert","Certify"]]
+  MW:   [["job","Work"],["supply","Supply"],["circuits","Circuit"],["photos","Photos"],["cert","Certify"]],
+  PAT:  [["job","Site"],["pat","Items"],["photos","Photos"],["cert","Certify"]]
 };
 function renderJob(){
   const job = curJob();
   const t = typeOf(job);
-  if (!TABS[t].some(x => x[0] === view.tab)) view.tab = "job";
+  if (!TABS[t].some(x => x[0] === view.tab) && !(view.tab === "danger" && t === "EICR")) view.tab = "job";
   if (view.tab === "circuits" && curCirc()) return renderCircuit();
+  if (view.tab === "pat" && view.patItem && job.pat && job.pat.items.some(x => x.id === view.patItem)) return renderPatItem();
   loadJobPhotos(job);
-  const body = { job: t === "EICR" ? tabJob : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert }[view.tab]();
+  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
   return `<header class="top"><button class="iconbtn" data-act="home" aria-label="All jobs">←</button><h1>${esc(jobTitle(job) === "Untitled job" ? "New " + TYPES[t] : jobTitle(job))}<span class="sub">${job.example ? "Example – not saved" : esc(TYPES[t]) + (job.reportNo ? " · " + esc(job.reportNo) : "")}</span></h1></header>
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example report – edits aren't saved</div>` : statusHtml()}
   ${job.handoff && !job.sig && settings.role !== "Tester" && view.tab === "job" ? `<main style="padding-bottom:0"><div class="warnline">Tested by ${esc(job.handoff.by)} and sent for sign-off ${esc(agoText(job.handoff.at))}. Check it through, then sign on the ${t === "EICR" ? "Report" : "Certify"} tab.</div></main>` : ""}
@@ -1152,7 +1527,7 @@ function renderJob(){
 
 function renderTabs(){
   const nav = document.getElementById("tabs");
-  if (view.screen !== "job" || !curJob() || (view.tab === "circuits" && curCirc())) { nav.hidden = true; nav.innerHTML = ""; return; }
+  if (view.screen !== "job" || !curJob() || (view.tab === "circuits" && curCirc()) || (view.tab === "pat" && view.patItem)) { nav.hidden = true; nav.innerHTML = ""; return; }
   const job = curJob(), s = jobSummary(job), t = TABS[typeOf(job)];
   const warn = s.unwrittenFails.length + s.coded.length + (typeOf(job) !== "EICR" ? s.fails.length : 0);
   nav.hidden = false;
@@ -1166,7 +1541,7 @@ function tabWork(){
   const notifiable = NOTIFY.some(([k]) => w.notify[k] === "Yes");
   return `
   <div class="card"><h2>${t === "EIC" ? "Certificate" : "Minor works"}</h2><div class="grid2">${field(t === "EIC" ? "Certificate number" : "Certificate number","job.reportNo")}${field(t === "EIC" ? "Date of completion" : "Date work completed","job.inspDate",{type:"date"})}</div></div>
-  <div class="card"><h2>Client</h2>${field("Client","job.client.name")}${field("Telephone","job.client.phone",{type:"tel"})}${field("Client address","job.client.address",{area:true})}</div>
+  <div class="card"><h2>Client</h2>${field("Client","job.client.name")}<div class="grid2">${field("Telephone","job.client.phone",{type:"tel"})}${field("Email","job.client.email",{type:"email"})}</div>${field("Client address","job.client.address",{area:true})}</div>
   <div class="card"><h2>Installation</h2>${field("Installation address","job.address",{area:true})}${field("Occupier","job.occupier")}
     ${select("Description of premises","job.premises",PREMISES.map(p => p[0]),{rerender:true})}</div>
   <div class="card"><h2>The work</h2>
@@ -1184,16 +1559,28 @@ function tabWork(){
     ${field("Departures from BS 7671 (if any)","job.work.departures",{area:true,ph:"None"})}
     ${field("Comments on the existing installation","job.work.existing",{area:true})}
     ${job.example ? "" : `<button class="btn ghost sm" data-act="codesFor" data-target="existing">Find a defect in the coding guide</button>`}
-  </div>`;
+  </div>
+  ${evPvCard(job)}`;
 }
 
 /* ---------------- EIC / Minor Works: certify tab */
 function signBlock(job){
   if (settings.role === "Tester") return `<div class="card"><h2>Sign-off</h2><div class="muted">This will be signed by <b>${esc(job.inspector || settings.signOffName)}</b>. When everything is filled in and tested, send it for sign-off below.</div></div>`;
-  return `<div class="field"><span>Signature</span><canvas class="sig" id="sig" aria-label="Sign here with your finger"></canvas><div class="row"><span class="muted small">Sign with your finger</span><span class="spacer"></span><button class="btn ghost sm" data-act="clearSig">Clear</button></div></div>`;
+  return sigPad("Signature", "job.sig", "job.sigDate");
 }
 function tabCert(){
   const job = j(), t = typeOf(job), s = jobSummary(job), w = job.work;
+  if (t === "PAT") {
+    const ps = s.pat, probs = [];
+    if (!ps.total) probs.push(`<div class="warnline">No items added yet.</div>`);
+    if (ps.none + ps.check) probs.push(`<div class="warnline">${ps.none + ps.check} item${ps.none + ps.check === 1 ? " is" : "s are"} not fully tested yet.</div>`);
+    if (ps.fail) probs.push(`<div class="errline">${ps.fail} item${ps.fail === 1 ? "" : "s"} failed – label and withdraw from use.</div>`);
+    return `<div class="banner ${ps.fail ? "fail" : s.status === "pass" ? "pass" : "none"}"><span class="small">PAT register</span><strong>${ps.pass} PASS · ${ps.fail} FAIL</strong><span class="small">${ps.total} item${ps.total === 1 ? "" : "s"}</span></div>
+    ${probs.length ? `<div class="card"><h2>To sort out</h2>${probs.join("")}</div>` : ""}
+    <div class="card"><h2>Declaration</h2><div class="grid2">${field("Tested by","job.inspector")}${field("Position","job.position")}</div>${settings.role === "Tester" ? "" : signBlock(job)}
+      <div class="grid2">${field("Date signed","job.sigDate",{type:"date"})}${field("Date of issue","job.issueDate",{type:"date"})}</div></div>
+    ${settings.role === "Tester" ? signBlock(job) : ""}${handoverCard(job)}${finishCard(job)}`;
+  }
   const problems = [];
   s.fails.forEach(f => problems.push(`<div class="errline">${esc(f.b.ref)} circuit ${esc(f.c.no)} (${esc(f.c.desc || "no description")}) has failed a test.</div>`));
   s.inspFails.forEach(([id,q]) => problems.push(`<div class="errline">Inspection ${esc(id)} marked ✗ – ${esc(q)}.</div>`));
@@ -1220,6 +1607,7 @@ function tabCert(){
     <div class="grid2">${field("Date signed","job.sigDate",{type:"date"})}${field("Date of issue","job.issueDate",{type:"date"})}</div>
   </div>
   ${settings.role === "Tester" ? signBlock(job) : ""}
+  ${handoverCard(job)}
   ${finishCard(job)}`;
 }
 
@@ -1235,10 +1623,11 @@ function finishCard(job){
        <button class="btn ghost sm" data-act="shareJob">Share job file</button>`
     : (() => { const blockers = [];
         if (!job.sig) blockers.push("sign the declaration");
-        if (t !== "EICR" && jobSummary(job).status !== "pass") blockers.push("get every circuit tested and passing");
+        if (t === "PAT" && jobSummary(job).status !== "pass") blockers.push("finish testing every item");
+        else if (t !== "EICR" && t !== "PAT" && jobSummary(job).status !== "pass") blockers.push("get every circuit tested and passing");
         const mp = missingPhotos(job).length; if (mp) blockers.push(`take the required photos (${mp} missing – see the Photos tab)`);
         return blockers.length ? `<button class="btn block" disabled style="opacity:.5">Finish &amp; send to office</button><div class="warnline">Before finishing: ${blockers.join(" and ")}.</div>` : "";
-      })() + `<button class="btn block" data-act="finish" ${!job.sig || (t !== "EICR" && jobSummary(job).status !== "pass") ? "hidden" : ""}>${job.sentAt || job.sendQueued ? "Send again to office" : "Finish &amp; send to office"}</button>
+      })() + `<button class="btn block" data-act="finish" ${!job.sig || (t !== "EICR" && jobSummary(job).status !== "pass") || missingPhotos(job).length ? "hidden" : ""}>${job.sentAt || job.sendQueued ? "Send again to office" : "Finish &amp; send to office"}</button>
        <div class="row small"><span class="muted">To ${esc(settings.officeEmail)}${settings.sendUrl ? " and your Google Drive" : ""}. ${IOS ? (settings.sendUrl ? "Choose <b>Save to Files</b> to keep a copy on the phone." : "Choose <b>Mail</b> to send it to the office, or <b>Save to Files</b> to keep a copy.") : "A copy is also saved to Downloads."}</span>${sendStatus(job)}</div>
        ${job.sendError && job.sendQueued ? `<div class="warnline">Not sent yet: ${esc(job.sendError)}. It will keep trying.</div>` : ""}
        `;
@@ -1330,7 +1719,7 @@ function tabJob(){
   return `
   <div class="card"><h2>Report</h2><div class="grid2">${field("Report number","job.reportNo")}${field("Inspection date","job.inspDate",{type:"date"})}</div>
     ${select("Reason for the report","job.reason",REASONS)}</div>
-  <div class="card"><h2>Client</h2>${field("Person ordering the report","job.client.name")}${field("Telephone","job.client.phone",{type:"tel"})}${field("Client address","job.client.address",{area:true})}</div>
+  <div class="card"><h2>Client</h2>${field("Person ordering the report","job.client.name")}<div class="grid2">${field("Telephone","job.client.phone",{type:"tel"})}${field("Email","job.client.email",{type:"email"})}</div>${field("Client address","job.client.address",{area:true})}</div>
   <div class="card"><h2>Installation</h2>${field("Installation address","job.address",{area:true})}${field("Occupier","job.occupier")}
     ${select("Description of premises","job.premises",PREMISES.map(p => p[0]),{rerender:true})}
     <div class="grid2">${field("Estimated age of wiring","job.wiringAge",{num:true,unit:"yrs"})}${field("Date of last inspection","job.lastInsp",{type:"date"})}</div>
@@ -1338,7 +1727,8 @@ function tabJob(){
     ${j().alterations === "Yes" ? field("Estimated age of alterations","job.alterAge",{num:true,unit:"yrs"}) : ""}
     ${chips("Installation records available","job.records",["Yes","No"])}${field("Records held by","job.recordsHeld")}</div>
   <div class="card"><h2>Extent and limitations</h2>${field("Extent of the installation covered","job.extent",{area:true})}${field("Agreed limitations (and reasons)","job.limitations",{area:true})}
-    <div class="grid2">${field("Agreed with","job.limitAgreed")}${field("Operational limitations","job.opLimits")}</div></div>`;
+    <div class="grid2">${field("Agreed with","job.limitAgreed")}${field("Operational limitations","job.opLimits")}</div></div>
+  ${evPvCard(j())}`;
 }
 const j = () => curJob();
 
@@ -1391,6 +1781,7 @@ function tabCircuits(){
       <div class="grid2">${chips("Polarity confirmed","board.polarity",["✓","✗"])}${chips("Phase sequence","board.seq",["✓","✗","N/A"],{small:true})}</div>
       <div class="grid2">${field("Tested by","board.testedBy")}${field("Date tested","board.date",{type:"date"})}</div>
       ${field("Multifunction tester","board.mft")}<div class="grid2">${field("IR tester","board.irSerial")}${field("Loop / RCD tester","board.loopSerial")}</div>${field("Earth electrode tester","board.elecSerial")}
+      ${job.example ? "" : `<div class="row"><button class="btn ghost sm" data-act="chart">Circuit chart</button><button class="btn ghost sm" data-act="labels">Label strip (P-touch)</button>${typeOf(job) === "MW" ? "" : `<button class="btn ghost sm" data-act="dupBoard">Duplicate board</button>`}</div>`}
       ${job.boards.length > 1 && !job.example ? (view.confirmDel === "board" ? `<div class="row"><span class="small">Delete this board and its ${b.circuits.length} circuits?</span><button class="btn danger sm" data-act="delBoard">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="board">Delete board</button>`) : ""}
     </div></details>
   </div>
@@ -1452,12 +1843,12 @@ function renderCircuit(){
 
 function tabInspect(){
   const job = j();
-  const done = INSP_FLAT.filter(([id]) => job.insp[id.replace(".","_")]).length;
-  return `<div class="card"><h2>Schedule of inspections <span class="count">${done} / ${INSP_FLAT.length}</span></h2>
+  const done = inspFlat(job).filter(([id]) => job.insp[id.replace(".","_")]).length;
+  return `<div class="card"><h2>Schedule of inspections <span class="count">${done} / ${inspFlat(job).length}</span></h2>
     <div class="muted small">${typeOf(job) === "EICR" ? "Coding an item C1, C2, C3 or FI adds it to your observations on the Report tab." : "✓ inspected and satisfactory · ✗ not satisfactory (must be put right before certifying) · N/A not applicable."}</div></div>` +
-  INSP.map(([sid, title, items]) => `<div class="card"><h2>${esc(sid)}. ${esc(title)}</h2>
+  inspSecs(job).map(([sid, title, items]) => `<div class="card"><h2>${esc(sid)}. ${esc(title)}</h2>
     <div class="insp-sec">${items.map(([id, q]) => `<div class="insp-item"><div class="q"><b>${esc(id)}</b>${esc(q)}</div>${chips("", "job.insp." + id.replace(".","_"), typeOf(job) === "EICR" ? OUTCOMES : ["✓","✗","N/A"], {small:true, codes:true}).replace('<span></span>','')}</div>`).join("")}</div>
-    <button class="btn ghost sm" data-act="allOk" data-sec="${esc(sid)}">Mark the rest ✓</button></div>`).join("");
+    <button class="btn ghost sm" data-act="allOk" data-sec="${esc(sid)}">Mark the rest ✓</button></div>`).join("") + pvStringsCard(job);
 }
 
 function tabReport(){
@@ -1475,6 +1866,8 @@ function tabReport(){
     <div class="field"><span>Photos</span>${thumbs(o.photos, "obs:" + o.id)}</div></div>`).join("");
   return `${banner}
   <div class="codes">${["C1","C2","C3","FI"].map(k => `<div><b>${s.counts[k]}</b><span>${k}</span></div>`).join("")}</div>
+  ${dangerCard(job)}
+  ${prevObsCard(job)}
   ${warns.length ? `<div class="card"><h2>To sort out</h2>${warns.join("")}</div>` : ""}
   <div class="card"><h2>Observations <span class="count">${job.obs.length}</span></h2>
     <div class="muted small">${CODES.map(c => `<b>${c[0]}</b> ${esc(c[1])}`).join(" · ")}</div>
@@ -1535,6 +1928,8 @@ document.addEventListener("input", e => {
   const obj = roots()[root]; if (!obj) return;
   let path = rest.join(".");
   setPath(obj, path, el.value);
+  if (root === "job" && path === "reportNo") obj.numPending = false;
+  if (root === "settings" && (path === "sendUrl" || path === "sendKey")) scheduleSync(1500);
   if (root === "settings") flush();
   else markDirty(j());
   if (el.hasAttribute("data-rerender")) { if (path === "dev") { const c = curCirc(); if (c && ZS[c.dev] && !ZS[c.dev][+c.rating]) c.rating = ""; } rerender(); }
@@ -1568,7 +1963,7 @@ document.addEventListener("click", e => {
     case "settings": view.screen = "settings"; render(); break;
     case "chooser": view.chooser = true; rerender(); break;
     case "chooserOff": view.chooser = false; rerender(); break;
-    case "newType": { const nj = newJob(a.dataset.type); jobs.push(nj); markDirty(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); break; }
+    case "newType": { const nj = newJob(a.dataset.type); jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); break; }
     case "book": view = {screen:"book", chapter:null, calc:view.calc, bookDev:view.bookDev}; render(); break;
     case "bookHome": view.chapter = null; render(); break;
     case "chapter": view.chapter = a.dataset.id; render(); break;
@@ -1581,6 +1976,32 @@ document.addEventListener("click", e => {
       jb.updated = Date.now(); lsWrite(); scheduleSync(6000);
       view = {screen:"job", jobId:cf.jobId, tab:cf.tab, board:0, circ:null}; render(); break; }
     case "syncNow": syncNow(); break;
+    case "newFrom": { const nj = newJobFrom(job, a.dataset.type); jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); toast(`New ${TYPES[a.dataset.type]} started from this job`); break; }
+    case "copyFrom": { const src = jobs.find(x => x.id === a.dataset.id); if (!src) break; copyFrom(job, src); markDirty(job); rerender(); toast("Copied – check everything and re-test"); break; }
+    case "prevObs": { const o = job.prevObs[+a.dataset.i]; if (!o) break; job.obs.push({id:uid(), text:o.text, loc:o.loc || "", reg:o.reg || "", code:o.code || "", src:"prev", photos:[]}); o.added = true; markDirty(job); rerender(); break; }
+    case "dupBoard": { const b = curBoard(); const nb = copyBoard(b, job.boards.length + 1); job.boards.push(nb); view.board = job.boards.length - 1; markDirty(job); render(); toast(`${nb.ref} created with the same circuits – rename it and test`); break; }
+    case "chart": printHtml(circuitChartHtml(job, curBoard()), "circuits"); break;
+    case "labels": saveLabelStrip(job, curBoard()); break;
+    case "openDanger": view.tab = "danger"; render(); break;
+    case "backToReport": view.tab = "report"; render(); break;
+    case "sendDanger": sendDanger(); break;
+    case "printDanger": printHtml(dangerHtml(job), "danger"); break;
+    case "clearSigPath": { const [rt, ...rs] = a.dataset.path.split("."); setPath(roots()[rt], rs.join("."), ""); markDirty(job); rerender(); break; }
+    case "due": view = {screen:"due"}; render(); break;
+    case "contacted": { const x = jobs.find(y => y.id === a.dataset.id); if (x) { x.contactedAt = Date.now(); x.updated = Date.now(); lsWrite(); scheduleSync(3000); } rerender(); break; }
+    case "reinspect": { const src = jobs.find(y => y.id === a.dataset.id); if (!src) break; const nj = newJobFrom(src, "EICR"); jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); break; }
+    case "addPat": { job.pat.items.push(newPatItem(job.pat.items.length + 1)); view.patItem = job.pat.items[job.pat.items.length - 1].id; markDirty(job); render(); break; }
+    case "patItem": view.patItem = a.dataset.id; view.confirmDel = null; render(); break;
+    case "patBack": view.patItem = null; view.confirmDel = null; render(); break;
+    case "patNext": { const it = job.pat.items; const i = it.findIndex(x => x.id === view.patItem);
+      if (i < it.length - 1) view.patItem = it[i + 1].id;
+      else { const prev = it[i]; const n = newPatItem(it.length + 1); if (prev) Object.assign(n, {location: prev.location, cls: prev.cls, kind: prev.kind, interval: prev.interval, irv: prev.irv}); it.push(n); view.patItem = n.id; markDirty(job); }
+      render(); break; }
+    case "dupPat": { const it = job.pat.items, cur = it.find(x => x.id === view.patItem); const n = Object.assign(newPatItem(it.length + 1), {desc: cur.desc, location: cur.location, cls: cur.cls, kind: cur.kind, fuse: cur.fuse, len: cur.len, csa: cur.csa, interval: cur.interval}); it.push(n); view.patItem = n.id; markDirty(job); render(); break; }
+    case "delPat": job.pat.items = job.pat.items.filter(x => x.id !== view.patItem); view.patItem = null; view.confirmDel = null; markDirty(job); render(); break;
+    case "addString": job.pv = job.pv || {}; job.pv.strings = job.pv.strings || []; job.pv.strings.push({voc:"", isc:"", irp:"", irn:"", pol:""}); markDirty(job); rerender(); break;
+    case "delString": job.pv.strings.splice(+a.dataset.i, 1); markDirty(job); rerender(); break;
+
     case "reload": (async () => { if (persistTimer) { clearTimeout(persistTimer); await writeNow(); } location.reload(); })(); break;
     case "copyCode": { const t = document.getElementById("conncode"); if (!t) break; const ok = () => { const m = document.getElementById("sendmsg"); a.textContent = "Copied"; };
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t.value).then(ok, () => { t.focus(); t.select(); }); else { t.focus(); t.select(); } break; }
@@ -1612,7 +2033,7 @@ document.addEventListener("click", e => {
     case "addObs": job.obs.push({id:uid(), text:"", loc:"", reg:"", code:"", src:""}); markDirty(job); rerender(); setTimeout(() => { const t = document.querySelectorAll(".obs textarea"); t.length && t[t.length-1].focus(); }, 50); break;
     case "obsFromCirc": obsFromCircuit(curBoard(), curCirc()); rerender(); break;
     case "obsFromFail": { const b = job.boards.find(x => x.id === a.dataset.b); const c = b && b.circuits.find(x => x.id === a.dataset.c); if (c) obsFromCircuit(b, c); rerender(); break; }
-    case "allOk": { const sec = INSP.find(s => s[0] === a.dataset.sec); sec[2].forEach(([id]) => { const k = id.replace(".","_"); if (!job.insp[k]) job.insp[k] = "✓"; }); markDirty(job); rerender(); break; }
+    case "allOk": { const sec = inspSecs(job).find(s => s[0] === a.dataset.sec); sec[2].forEach(([id]) => { const k = id.replace(".","_"); if (!job.insp[k]) job.insp[k] = "✓"; }); markDirty(job); rerender(); break; }
     case "clearSig": job.sig = ""; markDirty(job); rerender(); break;
     case "export": exportReport(); break;
     case "print": printReport(); break;
@@ -1632,7 +2053,7 @@ function onInspCode(id, val){
   const job = j(); if (job.example || typeOf(job) !== "EICR") return;
   if (["C1","C2","C3","FI"].includes(val)){
     const existing = job.obs.find(o => o.src === "insp:" + id);
-    const item = INSP_FLAT.find(x => x[0] === id);
+    const item = inspFlat(job).find(x => x[0] === id);
     if (existing) existing.code = val;
     else job.obs.push({id:uid(), text:item ? item[1] + " – " : "", loc:"", reg:"", code:val, src:"insp:" + id});
   }
@@ -1682,6 +2103,7 @@ footer{margin-top:14px;font-size:9px;color:#555;text-align:center}
 .photos .na div{height:60px;display:flex;align-items:center;justify-content:center;background:#f4f4f4;color:#555}
 `;
 function exportHtml(job){
+  if (typeOf(job) === "PAT") return exportPat(job);
   if (typeOf(job) !== "EICR") return exportCert(job);
   const s = jobSummary(job), sup = calcSupply(job), co = job.company || settings;
   const row = (l, v) => `<tr><th>${esc(l)}</th><td>${esc(v ?? "")}</td></tr>`;
@@ -1719,8 +2141,9 @@ ${sec("J. Particulars of the installation at the origin")}<table class="kv"><tbo
 ${sec("K. Observations and recommendations")}<table class="obs"><thead><tr><th>Item</th><th>Observation</th><th>Location</th><th>Regulation</th><th>Code</th></tr></thead><tbody>${job.obs.length ? job.obs.map((o,i) => `<tr><td>${i+1}</td><td>${esc(o.text)}${(o.photos || []).length ? ` <i>(photo${o.photos.length === 1 ? "" : "s"} attached)</i>` : ""}</td><td>${esc(o.loc)}</td><td>${esc(o.reg)}</td><td class="code ${esc(o.code)}">${esc(o.code)}</td></tr>`).join("") : `<tr><td colspan="5">No observations.</td></tr>`}</tbody></table>
 <p class="guide">C1 Danger present – immediate action required. C2 Potentially dangerous – urgent remedial action required. C3 Improvement recommended. FI Further investigation required without delay.</p>
 <h2>Guidance for recipients</h2><p class="guide">This report assesses the condition of the electrical installation at the time of inspection, within the extent and limitations stated. Keep it safe and show it to anyone carrying out further work or the next inspection. If the overall assessment is UNSATISFACTORY, arrange for the C1, C2 and FI items to be put right by a competent person as soon as possible.</p>
+${evPvExportHtml(job)}
 ${photosSectionHtml(job, true)}
-<section style="break-before:page">${sec("Schedule of inspections")}<table class="insp"><thead><tr><th>Item</th><th>Description</th><th>Outcome</th></tr></thead><tbody>${INSP.map(([sid,t,items]) => `<tr class="grp"><td>${sid}</td><td colspan="2">${esc(t)}</td></tr>` + items.map(([id,q]) => `<tr><td>${id}</td><td>${esc(q)}</td><td>${esc(inspVal(id))}</td></tr>`).join("")).join("")}</tbody></table>
+<section style="break-before:page">${sec("Schedule of inspections")}<table class="insp"><thead><tr><th>Item</th><th>Description</th><th>Outcome</th></tr></thead><tbody>${inspSecs(job).map(([sid,t,items]) => `<tr class="grp"><td>${sid}</td><td colspan="2">${esc(t)}</td></tr>` + items.map(([id,q]) => `<tr><td>${id}</td><td>${esc(q)}</td><td>${esc(inspVal(id))}</td></tr>`).join("")).join("")}</tbody></table>
 <p class="guide">✓ Acceptable · C1/C2/C3/FI see observations · N/V Not verified · LIM Limitation · N/A Not applicable</p></section>
 ${boards}
 <footer>${esc(co.company || "BlueForge Engineering")} – EICR ${esc(job.reportNo || "")} – ${esc(job.address || "")}</footer>
@@ -1742,7 +2165,7 @@ function exportCert(job){
   const boardTable = b => `<table class="kv"><tbody>${row2("Board", b.ref, "Location", b.location)}${row2("Zdb (Ω)", boardZdb(job,b) ?? "", "Ipf at board (kA)", boardIpf(job,b) ?? "")}${row2("Tested by", b.testedBy, "Date tested", ukDate(b.date))}${row2("Multifunction tester", b.mft, "IR / loop / RCD testers", [b.irSerial, b.loopSerial].filter(Boolean).join(" · "))}</tbody></table>
     <table class="sched"><thead><tr>${CERT_HEAD.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${certCircuitRows(job, b)}</tbody></table>`;
   const supplyTables = `${sec(t === "EIC" ? "Supply characteristics and earthing arrangements" : "Part 2 – Installation details")}<table class="kv"><tbody>${row2("Earthing arrangement", job.supply.earth, "Live conductors", job.supply.phases)}${row2("Ze (Ω)", job.supply.ze, "Ipf (kA)", job.supply.ipf)}${row2("Nominal voltage Uo (V)", job.supply.uo, "Frequency (Hz)", job.supply.freq)}${row2("Supply protective device", [job.supply.devBs, job.supply.devRating && job.supply.devRating + " A"].filter(Boolean).join(" · "), "Method of fault protection", "Automatic disconnection of supply")}${row2("Earthing conductor (mm²)", job.supply.earthCsa + (sup.earthCheck ? ` – ${sup.earthCheck.t}` : ""), "Main bonding (mm²)", job.supply.bondCsa + (sup.bondCheck ? ` – ${sup.bondCheck.t}` : ""))}${row2("Bonding: water / gas / oil", [job.supply.water, job.supply.gas, job.supply.oil].map(x => x || "–").join(" / "), "Bonding: steel / other", [job.supply.steel || "–", job.supply.otherBond].filter(Boolean).join(" / "))}${t === "EIC" ? row2("Main switch", [job.supply.msBs, job.supply.msRating].filter(Boolean).join(" · "), "Maximum demand (A)", w.maxDemand) : ""}</tbody></table>`;
-  const inspTable = `<section style="break-before:page">${sec("Schedule of inspections")}<table class="insp"><thead><tr><th>Item</th><th>Description</th><th>Outcome</th></tr></thead><tbody>${INSP.map(([sid,tt,items]) => `<tr class="grp"><td>${sid}</td><td colspan="2">${esc(tt)}</td></tr>` + items.map(([id,q]) => `<tr><td>${id}</td><td>${esc(q)}</td><td>${esc(job.insp[id.replace(".","_")] || "")}</td></tr>`).join("")).join("")}</tbody></table><p class="guide">✓ Inspected and satisfactory · ✗ Not satisfactory · N/A Not applicable</p></section>`;
+  const inspTable = `<section style="break-before:page">${sec("Schedule of inspections")}<table class="insp"><thead><tr><th>Item</th><th>Description</th><th>Outcome</th></tr></thead><tbody>${inspSecs(job).map(([sid,tt,items]) => `<tr class="grp"><td>${sid}</td><td colspan="2">${esc(tt)}</td></tr>` + items.map(([id,q]) => `<tr><td>${id}</td><td>${esc(q)}</td><td>${esc(job.insp[id.replace(".","_")] || "")}</td></tr>`).join("")).join("")}</tbody></table><p class="guide">✓ Inspected and satisfactory · ✗ Not satisfactory · N/A Not applicable</p></section>`;
   let body;
   if (t === "EIC") {
     const signers = w.sameSigner === "No"
@@ -1777,6 +2200,8 @@ ${sec("Part 4 – Declaration")}<p class="guide">I/We certify that the minor wor
 <div class="sub">${esc(TYPE_LONG[t])} – BS 7671:2018+A4:2026</div>
 <table class="kv"><tbody>${row2("Certificate number", job.reportNo, "Date of issue", ukDate(job.issueDate))}${row2("Contractor", co.company, "Registration / scheme no.", co.reg)}</tbody></table>
 ${body}
+${evPvExportHtml(job)}
+${job.handover && job.handover.name ? `<h2>Customer handover</h2><table class="kv"><tbody><tr><th>Received by</th><td>${esc(job.handover.name)}</td><th>Date</th><td>${esc(ukDate(job.handover.date))}</td></tr><tr><th>Signature</th><td class="sig" colspan="3">${job.handover.sig ? `<img src="${job.handover.sig}" alt="">` : ""}</td></tr></tbody></table>` : ""}
 ${photosSectionHtml(job, false)}
 <footer>${esc(co.company || "BlueForge Engineering")} – ${esc(TYPES[t])} ${esc(job.reportNo || "")} – ${esc(job.address || "")}</footer>
 </body></html>`;

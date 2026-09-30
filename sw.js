@@ -1,5 +1,5 @@
 // BlueForge Certificates – offline cache. Bump CACHE on every release so devices pick up the new version.
-const CACHE = "bf-eicr-v8";
+const CACHE = "bf-eicr-v9";
 const SHELL = ["./", "./index.html", "./app.js", "./bf-data.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, {cache: "reload"})))).then(() => self.skipWaiting()));

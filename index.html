@@ -139,9 +139,10 @@ details.more>div{display:flex;flex-direction:column;gap:12px}
 .hero h2{font-family:var(--f-display);font-size:26px;margin:0;line-height:1.1;text-wrap:balance}
 .hero p{margin:0;opacity:.8;font-size:14px}
 .ex-tag{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--check);background:var(--check-bg);border-radius:6px;padding:2px 6px}
-.tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.tile{display:flex;flex-direction:column;gap:3px;text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;cursor:pointer;min-width:0}
-.tile b{font-family:var(--f-display);font-size:18px;color:var(--blue)}
+.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+@media (max-width:360px){.tiles{grid-template-columns:1fr 1fr}}
+.tile{display:flex;flex-direction:column;gap:3px;text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 10px;cursor:pointer;min-width:0}
+.tile b{font-family:var(--f-display);font-size:17px;color:var(--blue)}
 .tile span{font-size:12.5px;color:var(--muted)}
 .typetag{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;background:var(--blue-soft);color:var(--blue);border-radius:5px;padding:1px 6px;margin-right:4px}
 .codes-list{display:flex;flex-direction:column;gap:8px}
