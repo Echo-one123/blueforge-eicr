@@ -853,29 +853,98 @@ table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid 
 <table><thead><tr><th>Cct</th><th>Description</th><th>Protective device</th><th>RCD</th><th>Cable</th><th>Points</th></tr></thead><tbody>${rows}</tbody></table>
 <div class="foot">${esc(co.company || "BlueForge Engineering")} · ${esc(co.phone || "")} · Tested ${esc(ukDate(b.date || job.inspDate))}${job.reportNo ? " · Ref " + esc(job.reportNo) : ""}</div></body></html>`;
 }
-function labelStripPng(b){
-  const dpmm = 180 / 25.4, mod = (num(settings.labelModuleMm) || 18) * dpmm, H = Math.round(18 * dpmm);
-  const cv = document.createElement("canvas"); cv.width = Math.max(1, Math.round(mod * b.circuits.length)); cv.height = H;
-  const x = cv.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0, 0, cv.width, H); x.fillStyle = "#000"; x.strokeStyle = "#000"; x.lineWidth = 2;
-  b.circuits.forEach((c, i) => {
-    const x0 = Math.round(i * mod); if (i) { x.beginPath(); x.moveTo(x0, 0); x.lineTo(x0, H); x.stroke(); }
-    x.textAlign = "center"; x.font = "bold 30px Arial"; x.fillText(String(c.no || i + 1), x0 + mod/2, 30);
-    x.font = "17px Arial";
-    const words = String(c.desc || "").split(/\s+/); let line = "", y = 54;
-    for (const w of words) { const t = line ? line + " " + w : w; if (x.measureText(t).width > mod - 8 && line) { x.fillText(line, x0 + mod/2, y); y += 18; line = w; if (y > H - 28) break; } else line = t; }
-    if (line && y <= H - 28) x.fillText(line, x0 + mod/2, y);
-    x.font = "bold 16px Arial"; x.fillText(devShort(c).replace(" MCB","").replace(" RCBO"," RCBO"), x0 + mod/2, H - 8);
-  });
-  return cv.toDataURL("image/png");
-}
-async function saveLabelStrip(job, b){
-  const data = labelStripPng(b), name = `Labels ${b.ref} ${jobTitle(job)}.png`.replace(/[\\/:*?"<>|]/g, "");
-  const bin = atob(data.split(",")[1]), arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-  const blob = new Blob([arr], {type: "image/png"});
-  if (IOS || (navigator.canShare && navigator.canShare({files:[new File([blob], name, {type:"image/png"})]}))) {
-    try { await navigator.share({files:[new File([blob], name, {type:"image/png"})], title: name}); return; } catch(e){ if (e && e.name === "AbortError") return; }
+/* ---------------- circuit labels for the Brother PT-E560BT (24 mm TZe tape = 128 dots high at 180 dpi) */
+const TAPE_H = 128, DPMM = 180 / 25.4;
+const labText = (c) => String(c.label || c.desc || ("Circuit " + (c.no || ""))).replace(/\s+/g, " ").trim();
+function labDevice(c){ const d = devShort(c); if (d === "No device") return ""; return (d.replace(" MCB","") + (c.rcd && !d.includes("RCBO") ? " · " + c.rcd + "mA RCD" : c.rcd ? " " + c.rcd + "mA" : "")).trim(); }
+const labOn = (c) => !c.noLabel;
+function labelCanvas(b, job){
+  const layout = settings.labLayout || "single", showDev = settings.labDevice !== "No", head = settings.labHead === "Yes";
+  const cs = b.circuits.filter(labOn), cv = document.createElement("canvas"), x = cv.getContext("2d");
+  const fit = (t, max, size, weight) => { let f = size; x.font = `${weight} ${f}px Arial`; while (x.measureText(t).width > max && f > 14) { f -= 2; x.font = `${weight} ${f}px Arial`; } return f; };
+  if (layout === "strip") {
+    const mod = Math.round((num(settings.labelModuleMm) || 18) * DPMM);
+    cv.width = Math.max(mod, mod * cs.length); cv.height = TAPE_H;
+    x.fillStyle = "#fff"; x.fillRect(0, 0, cv.width, TAPE_H); x.fillStyle = "#000"; x.strokeStyle = "#000"; x.lineWidth = 2; x.textAlign = "center"; x.textBaseline = "alphabetic";
+    cs.forEach((c, i) => {
+      const x0 = i * mod, cx = x0 + mod / 2; if (i) { x.beginPath(); x.moveTo(x0, 0); x.lineTo(x0, TAPE_H); x.stroke(); }
+      x.font = "bold 30px Arial"; x.fillText(String(c.no || i + 1), cx, 30);
+      const bottom = showDev ? TAPE_H - 26 : TAPE_H - 6;
+      let size = 20, lines;
+      for (;;) { x.font = `${size}px Arial`; lines = []; let line = "";
+        for (const w of labText(c).split(" ")) { const t = line ? line + " " + w : w; if (x.measureText(t).width > mod - 8 && line) { lines.push(line); line = w; } else line = t; }
+        if (line) lines.push(line);
+        if ((lines.length * (size + 2) <= bottom - 38 && lines.every(l => x.measureText(l).width <= mod - 6)) || size <= 12) break; size -= 1; }
+      lines.forEach((l, k) => { if (38 + (k + 1) * (size + 2) <= bottom + 2) x.fillText(l, cx, 36 + (k + 1) * (size + 2) - 2); });
+      if (showDev) { const d = labDevice(c).replace(/ · .*$/, ""); fit(d, mod - 6, 17, "bold"); x.fillText(d, cx, TAPE_H - 8); }
+    });
+    return cv;
   }
+  // separate labels, one after another with cut marks
+  const items = []; if (head) items.push({ big: [b.ref, b.location].filter(Boolean).join(" · ") || "Board", small: `Tested ${ukDate(b.date || job.inspDate)}${job.reportNo ? " · " + job.reportNo : ""}` });
+  cs.forEach(c => items.push({ no: String(c.no || ""), big: labText(c), small: showDev ? labDevice(c) : "" }));
+  const MAXW = 900, PAD = 26, GAP = 18;
+  x.font = "bold 52px Arial";
+  const sized = items.map(it => { const bigT = (it.no ? it.no + "  " : "") + it.big; const bf = fit(bigT, MAXW, it.small ? 50 : 60, "bold"); const bw = x.measureText(bigT).width;
+    let sw = 0, sf = 30; if (it.small) { sf = fit(it.small, MAXW, 30, "bold"); sw = x.measureText(it.small).width; }
+    return { ...it, bigT, bf, sf, w: Math.ceil(Math.max(bw, sw, 120) + PAD * 2) }; });
+  cv.width = Math.max(1, sized.reduce((n, it) => n + it.w + GAP, 0) - GAP); cv.height = TAPE_H;
+  x.fillStyle = "#fff"; x.fillRect(0, 0, cv.width, TAPE_H); x.fillStyle = "#000"; x.strokeStyle = "#000"; x.textAlign = "center";
+  let xo = 0;
+  sized.forEach((it, i) => {
+    const cx = xo + it.w / 2;
+    if (it.small) { x.font = `bold ${it.bf}px Arial`; x.fillText(it.bigT, cx, 62); x.font = `bold ${it.sf}px Arial`; x.fillText(it.small, cx, 108); }
+    else { x.font = `bold ${it.bf}px Arial`; x.fillText(it.bigT, cx, 84); }
+    xo += it.w;
+    if (i < sized.length - 1) { x.save(); x.setLineDash([8, 8]); x.lineWidth = 2; x.beginPath(); x.moveTo(xo + GAP / 2, 0); x.lineTo(xo + GAP / 2, TAPE_H); x.stroke(); x.restore(); xo += GAP; }
+  });
+  return cv;
+}
+function labelsCsv(job, b){
+  const clean = v => String(v ?? "").replace(/²/g, "2").replace(/[–—]/g, "-").replace(/·/g, "-").replace(/[^\x20-\x7E]/g, "").trim();
+  const q = v => { const t = clean(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const rows = [["Circuit","Label","Device","Board"]].concat(b.circuits.filter(labOn).map(c => [c.no, labText(c), settings.labDevice === "No" ? "" : labDevice(c), b.ref]));
+  return rows.map(r => r.map(q).join(",")).join("\r\n") + "\r\n";
+}
+async function shareFile(name, blob){
+  const f = new File([blob], name, {type: blob.type});
+  if (navigator.canShare && navigator.canShare({files:[f]})) { try { await navigator.share({files:[f], title: name}); return; } catch(e){ if (e && e.name === "AbortError") return; } }
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+}
+const labName = (job, b, ext) => `Labels ${b.ref || "DB"} ${jobTitle(job)}.${ext}`.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ");
+async function saveLabelPng(job, b){ const cv = labelCanvas(b, job); const blob = await new Promise(r => cv.toBlob(r, "image/png")); await shareFile(labName(job, b, "png"), blob); }
+async function saveLabelCsv(job, b){ await shareFile(labName(job, b, "csv"), new Blob([labelsCsv(job, b)], {type: "text/csv"})); }
+function drawLabelPreview(){
+  const box = document.getElementById("labprev"); const job = curJob(); if (!box || !job) return;
+  const b = curBoard(), cv = labelCanvas(b, job), n = b.circuits.filter(labOn).length;
+  cv.className = "labcv"; box.innerHTML = ""; if (n || settings.labHead === "Yes") box.appendChild(cv); else box.innerHTML = `<div class="muted small">No circuits ticked.</div>`;
+  const m = document.getElementById("labmeta"); if (m) m.textContent = `${n} label${n === 1 ? "" : "s"} · about ${Math.round(cv.width / DPMM / 10)} cm of 24 mm tape`;
+}
+function labelsCard(job){
+  if (job.example || typeOf(job) === "PAT" || !job.boards.some(b => b.circuits.length)) return "";
+  return `<div class="card"><h2>Circuit labels</h2><div class="muted small">Print a label for every circuit on the Brother on 24 mm tape – nothing is sent anywhere.</div><button class="btn block" data-act="openLabels">Labels</button></div>`;
+}
+function tabLabels(){
+  const job = j(), b = curBoard(), layout = settings.labLayout || "single";
+  const boardChips = job.boards.length > 1 ? `<div class="boards" role="group" aria-label="Boards">${job.boards.map((x,i) => `<button class="chip" data-act="board" data-i="${i}" aria-pressed="${i === Math.min(view.board, job.boards.length-1)}">${esc(x.ref || "DB" + (i+1))}</button>`).join("")}</div>` : "";
+  const rows = b.circuits.map((c, i) => `<div class="labrow${labOn(c) ? "" : " off"}"><button type="button" class="chip small" data-act="labToggle" data-i="${i}" aria-pressed="${labOn(c)}" aria-label="Print circuit ${esc(c.no)}">${labOn(c) ? "✓" : "–"}</button><b class="cno">${esc(c.no)}</b>
+    <input data-bind="board.circuits.${i}.label" value="${esc(c.label || "")}" placeholder="${esc(c.desc || "Circuit " + c.no)}" aria-label="Label for circuit ${esc(c.no)}"><span class="small muted">${esc(labDevice(c))}</span></div>`).join("");
+  return `${boardChips}
+  <div class="card"><h2>${esc(b.ref || "Board")} labels <span class="count" id="labmeta"></span></h2>
+    ${chips("Layout","settings.labLayout",[["single","One label per circuit"],["strip","Strip under the breakers"]])}
+    ${layout === "strip" ? field("Breaker width","settings.labelModuleMm",{num:true,unit:"mm",ph:"18",hint:"One section per breaker – 18 mm for most MCBs/RCBOs, 36 mm for double-width."}) : chips("Board name label first","settings.labHead",["Yes","No"])}
+    ${chips("Show breaker rating","settings.labDevice",["Yes","No"])}
+    <div class="labprev" id="labprev"></div>
+    <div class="grid2"><button class="btn" data-act="labCsv">Save list for Pro Label Tool</button><button class="btn ghost" data-act="labPng">Save label picture</button></div>
+    <button class="btn ghost sm" data-act="copyLabels">Copy label text</button>
+  </div>
+  <div class="card"><h2>Circuits</h2><div class="muted small">Untick any you don't want. Type a shorter name to fit the tape – the certificate keeps the full description.</div>${rows || `<div class="empty">No circuits on this board.</div>`}</div>
+  <div class="card"><h2>Printing on the Brother</h2><ol class="small steps">
+    <li>Load <b>24 mm TZe tape</b> in the PT-E560BT and turn it on with Bluetooth on.</li>
+    <li>Tap <b>Save list for Pro Label Tool</b> and save the file (Files / Downloads, or email it to yourself).</li>
+    <li>In <b>Brother Pro Label Tool</b>, pick the label type (e.g. Flag / General, or Patch panel for a strip), then use its <b>import / database</b> option to open the file. Tick <b>first line is a header</b> and set the <b>Field</b> for each line – Label on line 1, Device on line 2 – or nothing prints.</li>
+    <li>Check the preview and print – one label per circuit.</li>
+  </ol><div class="muted small">No luck with the import? <b>Save label picture</b> gives the whole tape as one image at the printer's resolution – open it in P-touch Editor on the PC, or any Brother app that prints images.</div></div>`;
 }
 function printHtml(html, returnTab){
   if (IOS) {
@@ -1754,6 +1823,7 @@ function render(){
   else if (view.screen === "job") { if (curJob() && !curJob().deleted) html = renderJob(); else { view = {screen:"home", tab:"job", board:0, circ:null}; html = renderHome(); } }
   app.innerHTML = html;
   renderTabs();
+  if (view.screen === "job" && view.tab === "labels") drawLabelPreview();
   initSigs();
   if (typeof renderVoice === "function") { if (!(view.screen === "job" && view.tab === "circuits" && curCirc()) && voice.mode === "readings" && voice.state !== "listening") voice.state = "idle"; renderVoice(); }
   if (view.keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
@@ -1896,11 +1966,11 @@ const TABS = {
 function renderJob(){
   const job = curJob();
   const t = typeOf(job);
-  if (!TABS[t].some(x => x[0] === view.tab) && !(view.tab === "danger" && t === "EICR") && !(view.tab === "quote" && t === "EICR" && billingOk()) && !(view.tab === "invoice" && billingOk())) view.tab = "job";
+  if (!TABS[t].some(x => x[0] === view.tab) && !(view.tab === "danger" && t === "EICR") && !(view.tab === "labels" && t !== "PAT") && !(view.tab === "quote" && t === "EICR" && billingOk()) && !(view.tab === "invoice" && billingOk())) view.tab = "job";
   if (view.tab === "circuits" && curCirc()) return renderCircuit();
   if (view.tab === "pat" && view.patItem && job.pat && job.pat.items.some(x => x.id === view.patItem)) return renderPatItem();
   loadJobPhotos(job);
-  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
+  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, labels:tabLabels, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
   return `<header class="top"><button class="iconbtn" data-act="home" aria-label="All jobs">←</button><h1>${esc(jobTitle(job) === "Untitled job" ? "New " + TYPES[t] : jobTitle(job))}<span class="sub">${job.example ? "Example – not saved" : esc(TYPES[t]) + (job.reportNo ? " · " + esc(job.reportNo) : "")}</span></h1></header>
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example report – edits aren't saved</div>` : statusHtml()}
   ${job.handoff && !job.sig && billingOk() && view.tab === "job" ? `<main style="padding-bottom:0"><div class="warnline">Tested by ${esc(job.handoff.by)} and sent for sign-off ${esc(agoText(job.handoff.at))}. Check it through, then sign on the ${t === "EICR" ? "Report" : "Certify"} tab.</div></main>` : ""}
@@ -1961,7 +2031,7 @@ function tabCert(){
     ${probs.length ? `<div class="card"><h2>To sort out</h2>${probs.join("")}</div>` : ""}
     <div class="card"><h2>Declaration</h2><div class="grid2">${field("Tested by","job.inspector")}${field("Position","job.position")}</div>${!billingOk() ? "" : signBlock(job)}
       <div class="grid2">${field("Date signed","job.sigDate",{type:"date"})}${field("Date of issue","job.issueDate",{type:"date"})}</div></div>
-    ${!billingOk() ? signBlock(job) : ""}${handoverCard(job)}${finishCard(job)}`;
+    ${!billingOk() ? signBlock(job) : ""}${handoverCard(job)}${finishCard(job)}${labelsCard(job)}`;
   }
   const problems = [];
   s.fails.forEach(f => problems.push(`<div class="errline">${esc(f.b.ref)} circuit ${esc(f.c.no)} (${esc(f.c.desc || "no description")}) has failed a test.</div>`));
@@ -1990,7 +2060,8 @@ function tabCert(){
   </div>
   ${!billingOk() ? signBlock(job) : ""}
   ${handoverCard(job)}
-  ${finishCard(job)}`;
+  ${finishCard(job)}
+  ${labelsCard(job)}`;
 }
 
 /* ---------------- finishing: shared by all report types */
@@ -2165,7 +2236,7 @@ function tabCircuits(){
       <div class="grid2">${chips("Polarity confirmed","board.polarity",["✓","✗"])}${chips("Phase sequence","board.seq",["✓","✗","N/A"],{small:true})}</div>
       <div class="grid2">${field("Tested by","board.testedBy")}${field("Date tested","board.date",{type:"date"})}</div>
       ${field("Multifunction tester","board.mft")}<div class="grid2">${field("IR tester","board.irSerial")}${field("Loop / RCD tester","board.loopSerial")}</div>${field("Earth electrode tester","board.elecSerial")}
-      ${job.example ? "" : `<div class="row"><button class="btn ghost sm" data-act="chart">Circuit chart</button><button class="btn ghost sm" data-act="copyLabels">Copy label text</button><button class="btn ghost sm" data-act="labels">Label picture</button>${typeOf(job) === "MW" ? "" : `<button class="btn ghost sm" data-act="dupBoard">Duplicate board</button>`}</div>`}
+      ${job.example ? "" : `<div class="row"><button class="btn ghost sm" data-act="chart">Circuit chart</button><button class="btn ghost sm" data-act="labels">Labels</button>${typeOf(job) === "MW" ? "" : `<button class="btn ghost sm" data-act="dupBoard">Duplicate board</button>`}</div>`}
       ${job.boards.length > 1 && !job.example ? (view.confirmDel === "board" ? `<div class="row"><span class="small">Delete this board and its ${b.circuits.length} circuits?</span><button class="btn danger sm" data-act="delBoard">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="board">Delete board</button>`) : ""}
     </div></details>
   </div>
@@ -2251,6 +2322,7 @@ function tabReport(){
   return `${banner}
   <div class="codes">${["C1","C2","C3","FI"].map(k => `<div><b>${s.counts[k]}</b><span>${k}</span></div>`).join("")}</div>
   ${dangerCard(job)}
+  ${labelsCard(job)}
   ${quoteCard(job)}
   ${prevObsCard(job)}
   ${warns.length ? `<div class="card"><h2>To sort out</h2>${warns.join("")}</div>` : ""}
@@ -2319,7 +2391,7 @@ document.addEventListener("input", e => {
   if (root === "settings") flush();
   else markDirty(j());
   if (el.hasAttribute("data-rerender")) { if (path === "dev") { const c = curCirc(); if (c && ZS[c.dev] && !ZS[c.dev][+c.rating]) c.rating = ""; } rerender(); }
-  else { refreshDerived(); if (root === "circ" && (path === "no" || path === "desc")) { const h = document.querySelector(".top h1"); const c = curCirc(); if (h && c) h.innerHTML = `${esc(curBoard().ref)} · Circuit ${esc(c.no)}<span class="sub">${esc(c.desc || "No description")}</span>`; } }
+  else { refreshDerived(); if (view.tab === "labels" && (/\.label$/.test(path) || path === "labelModuleMm")) drawLabelPreview(); if (root === "circ" && (path === "no" || path === "desc")) { const h = document.querySelector(".top h1"); const c = curCirc(); if (h && c) h.innerHTML = `${esc(curBoard().ref)} · Circuit ${esc(c.no)}<span class="sub">${esc(c.desc || "No description")}</span>`; } }
 });
 
 document.addEventListener("click", e => {
@@ -2404,8 +2476,11 @@ document.addEventListener("click", e => {
     case "prevObs": { const o = job.prevObs[+a.dataset.i]; if (!o) break; job.obs.push({id:uid(), text:o.text, loc:o.loc || "", reg:o.reg || "", code:o.code || "", src:"prev", photos:[]}); o.added = true; markDirty(job); rerender(); break; }
     case "dupBoard": { const b = curBoard(); const nb = copyBoard(b, job.boards.length + 1); job.boards.push(nb); view.board = job.boards.length - 1; markDirty(job); render(); toast(`${nb.ref} created with the same circuits – rename it and test`); break; }
     case "chart": printHtml(circuitChartHtml(job, curBoard()), "circuits"); break;
-    case "labels": saveLabelStrip(job, curBoard()); break;
-    case "copyLabels": { const t = curBoard().circuits.map(c => `${c.no} ${c.desc || ""} ${devShort(c).replace(" MCB", "")}`.replace(/\s+/g, " ").trim()).join("\n");
+    case "labels": case "openLabels": view.tab = "labels"; view.circ = null; render(); break;
+    case "labToggle": { const c = curBoard().circuits[+a.dataset.i]; if (c) { c.noLabel = !c.noLabel; markDirty(job); rerender(); } break; }
+    case "labCsv": saveLabelCsv(job, curBoard()); break;
+    case "labPng": saveLabelPng(job, curBoard()); break;
+    case "copyLabels": { const t = curBoard().circuits.filter(labOn).map(c => `${c.no} ${labText(c)} ${settings.labDevice === "No" ? "" : labDevice(c)}`.replace(/\s+/g, " ").trim()).join("\n");
       const done = () => toast(`Copied ${curBoard().circuits.length} labels – paste them into Pro Label Tool one per breaker`);
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, () => toast(t)); else toast(t); break; }
     case "openDanger": view.tab = "danger"; render(); break;

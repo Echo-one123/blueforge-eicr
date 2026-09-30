@@ -45,6 +45,16 @@ button,input,select,textarea{font:inherit;color:inherit}
 #splash.gone{opacity:0;pointer-events:none}
 #splash .sl{width:min(78vw,340px);max-height:40vh;object-fit:contain;background:#fff;border-radius:20px;padding:18px 20px}
 #splash .st{font-family:var(--f-display);font-weight:700;letter-spacing:.14em;font-size:15px;opacity:.85}
+.labprev{overflow-x:auto;background:#2a2a2a;border-radius:10px;padding:14px 10px;margin:4px 0 10px;-webkit-overflow-scrolling:touch}
+.labcv{display:block;height:72px;width:auto;max-width:none;background:#fff;border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.labrow{display:grid;grid-template-columns:44px 30px minmax(0,1fr);grid-template-areas:"t n i" ". . d";gap:2px 8px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.labrow > .chip{grid-area:t;padding:0;min-width:44px;width:44px}
+.labrow > .cno{grid-area:n;font-family:var(--f-mono);text-align:center;width:auto;height:auto;background:none;color:inherit;margin:0}
+.labrow > input{grid-area:i}
+.labrow input{min-width:0;width:100%;font:inherit;font-size:16px;padding:9px 10px;border:1.5px solid var(--line);border-radius:10px;background:var(--field);color:inherit}
+.labrow > span.small{grid-area:d}
+.labrow.off input,.labrow.off .cno{opacity:.45}
+ol.steps{margin:6px 0 8px;padding-left:20px;display:flex;flex-direction:column;gap:6px}
 .top h1{font-family:var(--f-display);font-weight:700;font-size:20px;margin:0;letter-spacing:.02em;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .top .sub{display:block;font-family:var(--f-body);font-weight:400;font-size:12px;opacity:.75;letter-spacing:0;overflow:hidden;text-overflow:ellipsis}
 .brandmark{font-family:var(--f-display);font-weight:700;letter-spacing:.12em;font-size:12px;opacity:.8}
