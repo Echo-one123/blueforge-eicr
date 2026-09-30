@@ -453,7 +453,7 @@ const dirty = new Set();
 let saveState = "saved";
 const LS = "bf-eicr-v1", IDB_NAME = "bf-eicr", IDB_STORE = "kv";
 let idb = null, writeChain = Promise.resolve(), persistTimer = null;
-const liveJobs = () => jobs.filter(x => !x.deleted && x.type !== "NVQ");
+const liveJobs = () => jobs.filter(x => !x.deleted && x.type !== "NVQ" && x.type !== "BOOKS");
 function idbOpen(){ return new Promise(res => { try { const r = indexedDB.open(IDB_NAME, 2); r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains(IDB_STORE)) d.createObjectStore(IDB_STORE); if (!d.objectStoreNames.contains("photos")) d.createObjectStore("photos"); }; r.onsuccess = () => res(r.result); r.onerror = () => res(null); r.onblocked = () => res(null); } catch(e){ res(null); } }); }
 function idbGet(k){ return new Promise(res => { if (!idb) return res(undefined); try { const q = idb.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); } catch(e){ res(undefined); } }); }
 function idbSet(k, v){ return new Promise(res => { if (!idb) return res(false); try { const tx = idb.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(v, k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); tx.onabort = () => res(false); } catch(e){ res(false); } }); }
@@ -530,9 +530,10 @@ async function init(){
     } catch(e){}
   }
   const lost = takePhotoPending();
-  if (lost && String(lost.target || "").startsWith("pf:") && jobs.some(x => x.id === lost.jobId && !x.deleted)) { view = {screen:"nvq", jobId:lost.jobId, pfItem: lost.target.slice(3)}; setTimeout(() => toast("Your phone closed the app while the camera was open – use Gallery to add that photo"), 800); }
+  if (lost && String(lost.target || "").startsWith("exp:") && jobs.some(x => x.id === lost.jobId && !x.deleted)) { view = {screen:"books", bk: {k:"exp", id: lost.target.slice(4)}}; setTimeout(() => toast("Your phone closed the app while the camera was open – use Gallery to add the receipt"), 800); }
+  else if (lost && String(lost.target || "").startsWith("pf:") && jobs.some(x => x.id === lost.jobId && !x.deleted)) { view = {screen:"nvq", jobId:lost.jobId, pfItem: lost.target.slice(3)}; setTimeout(() => toast("Your phone closed the app while the camera was open – use Gallery to add that photo"), 800); }
   else if (lost && jobs.some(x => x.id === lost.jobId && !x.deleted && x.type !== "NVQ")) { view = {screen:"job", jobId:lost.jobId, tab:"photos", board:0, circ:null, photoLost: lost.target}; }
-  else try { const r = JSON.parse(sessionStorage.getItem("bf-return") || "null"); sessionStorage.removeItem("bf-return"); if (r && r.screen === "nvq") view = {screen:"nvq", jobId:r.jobId, pfItem:r.pfItem}; else if (r && jobs.some(x => x.id === r.jobId && !x.deleted && x.type !== "NVQ")) view = {screen:"job", jobId:r.jobId, tab:r.tab, board:0, circ:null}; } catch(e){}
+  else try { const r = JSON.parse(sessionStorage.getItem("bf-return") || "null"); sessionStorage.removeItem("bf-return"); if (r && r.screen === "nvq") view = {screen:"nvq", jobId:r.jobId, pfItem:r.pfItem}; else if (r && r.screen === "books") view = {screen:"books"}; else if (r && jobs.some(x => x.id === r.jobId && !x.deleted && x.type !== "NVQ")) view = {screen:"job", jobId:r.jobId, tab:r.tab, board:0, circ:null}; } catch(e){}
   render(); hideSplash();
   if (lockOn()) showLock();
   window.addEventListener("online", () => { updateStatus(); syncNow(); });
@@ -568,6 +569,77 @@ async function api(action, data){
   }
   return o;
 }
+/* ---------------- weekly backup file to Google Drive, read back to prove it restores */
+const WEEK = 7 * 86400000;
+function backupPayload(){
+  const st = Object.assign({}, settings); ["sendKey","ownerHash","pinHash","bioId","askLog","askDraft"].forEach(k => delete st[k]);
+  return JSON.stringify({app:"blueforge-eicr", version:2, saved:new Date().toISOString(), settings: st, jobs: jobs.filter(x => !x.example && !x.deleted), photos: {}, note: "Photos are in the Photos folder of your Drive and come back through sync."});
+}
+async function driveBackup(){
+  const json = backupPayload(), sent = JSON.parse(json), name = `BlueForge backup ${today()} ${new Date().toTimeString().slice(0, 5).replace(":", "")}.json`;
+  const o = await api("backupSave", { name, json });
+  // read it back and check every job came through intact
+  const back = JSON.parse((await api("backupGet", { id: o.id })).json || "{}");
+  const ids = new Set((back.jobs || []).map(x => x.id)), ok = back.app === "blueforge-eicr" && sent.jobs.every(x => ids.has(x.id)) && (back.jobs || []).length === sent.jobs.length
+    && sent.jobs.every(x => { const y = back.jobs.find(z => z.id === x.id); return y && (y.updated || 0) === (x.updated || 0); });
+  settings.driveBackup = { at: Date.now(), name, jobs: sent.jobs.length, size: o.size || json.length, ok };
+  lsWrite();
+  if (!ok) throw new Error("the backup didn't read back correctly – try Back up now again");
+  return settings.driveBackup;
+}
+let backupBusy = false;
+async function maybeWeeklyBackup(force){
+  if (backupBusy || !settings.sendUrl || !billingOk() || scriptOld()) return;
+  const last = settings.driveBackup && settings.driveBackup.ok ? settings.driveBackup.at : 0;
+  if (!force && Date.now() - last < WEEK) return;
+  if (!force && !jobs.some(x => !x.example && !x.deleted)) return;
+  backupBusy = true;
+  try { await driveBackup(); if (view.screen === "settings") rerender(); }
+  catch(e){ if (force) throw e; }
+  finally { backupBusy = false; }
+}
+function driveBackupCard(){
+  if (!settings.sendUrl || !billingOk()) return "";
+  const b = settings.driveBackup, list = view.driveList;
+  return `<div class="card" id="drivebackup"><h2>Backups in Google Drive ${b ? pill(b.ok ? "pass" : "fail", b.ok ? "checked" : "check failed") : pill("none","none yet")}</h2>
+    <div class="muted small">Once a week the app saves a complete backup file to the <b>Backups</b> folder in your BlueForge Drive folder and reads it back to make sure it would restore. The last 8 are kept. Photos are already in Drive and come back through sync.</div>
+    ${b ? `<div class="small">Last backup <b>${esc(agoText(b.at))}</b> – ${b.jobs} job${b.jobs === 1 ? "" : "s"}, ${Math.round((b.size || 0) / 1024)} KB${b.ok ? " – read back and checked ✓" : ""}</div>` : ""}
+    <div class="row"><button class="btn sm" data-act="driveBackup">Back up now</button><button class="btn ghost sm" data-act="driveList">Restore from Drive</button></div>
+    <div id="drivemsg"></div>
+    ${list ? (list.length ? `<div class="presets">${list.map(x => `<button class="card-link" data-act="driveRestore" data-id="${esc(x.id)}"><div class="grow"><div class="t" style="font-weight:500">${esc(x.name.replace(/\.json$/, ""))}</div><div class="d">${esc(agoText(x.created))} · ${Math.round(x.size / 1024)} KB</div></div><span class="pill none">Restore</span></button>`).join("")}</div><div class="muted small">Restoring only adds jobs that are missing or older on this device – it never overwrites newer work.</div>` : `<div class="muted small">No backups in Drive yet.</div>`) : ""}
+  </div>`;
+}
+
+/* ---------------- is the Google script up to date? */
+const SCRIPT_NEEDED = 5;
+const scriptOld = () => !!settings.sendUrl && typeof settings.scriptVer === "number" && settings.scriptVer < SCRIPT_NEEDED;
+async function checkScript(force){
+  if (!settings.sendUrl || (!force && Date.now() - (settings.scriptChecked || 0) < 6 * 3600000)) return;
+  const was = scriptOld();
+  try { const o = await api("ping", {}); settings.scriptVer = Number(o.version) || 1; }
+  catch(e){ if (/old version/i.test(String(e.message))) settings.scriptVer = 0; else return; }
+  settings.scriptChecked = Date.now(); lsWrite();
+  if (was !== scriptOld() || force) rerender();
+}
+function scriptBanner(){
+  if (!scriptOld()) return "";
+  return billingOk() || settings.role !== "Tester"
+    ? `<div class="warnline"><b>Your Google script needs updating.</b> Some features won't work until it's done – it takes 2 minutes on a computer. <button class="btn ghost sm" data-act="scriptHelp">Show me how</button></div>`
+    : `<div class="warnline">The Google script needs updating – ask ${esc(settings.signOffName || "the owner")} to update it. Your work still saves and syncs.</div>`;
+}
+function scriptUpdateCard(){
+  if (!settings.sendUrl) return "";
+  const old = scriptOld();
+  return `<div class="nested" id="scriptcard"><h2>Google script ${old ? pill("fail","update needed") : typeof settings.scriptVer === "number" ? pill("pass","up to date") : ""}</h2>
+    ${old ? `<ol class="small steps">
+      <li>On a computer, tap <b>Copy the new script</b> below (or open this app there and do it).</li>
+      <li>Go to <b>script.google.com</b> and open your BlueForge project.</li>
+      <li>Select everything in the editor, delete it, paste the new script and click <b>Save</b>.</li>
+      <li>Pick <b>authorise</b> in the function list at the top and click <b>Run</b>. If Google asks for permission, click <b>Allow</b>.</li>
+      <li><b>Deploy › Manage deployments</b> › the pencil › Version: <b>New version</b> › <b>Deploy</b>. The link stays the same.</li>
+      <li>Come back here and tap <b>Check again</b>.</li></ol>` : `<div class="muted small">The app checks this every few hours and tells you if the script needs updating.</div>`}
+    <div class="row"><button class="btn ${old ? "" : "ghost "}sm" data-act="copyScript">Copy the new script</button><button class="btn ghost sm" data-act="scriptCheck">Check again</button></div></div>`;
+}
 function isEditing(){ const a = document.activeElement; return !!(a && a.matches && a.matches("input,textarea,select") && document.getElementById("app").contains(a)); }
 async function syncNow(){
   if (!settings.sendUrl) return;
@@ -598,6 +670,7 @@ async function syncNow(){
     settings.lastSync = Date.now();
     lsWrite();
     setSync("idle");
+    setTimeout(() => { checkScript(); maybeWeeklyBackup(); }, 1500);
     if (changed && !isEditing() && !(openChanged && view.screen === "job" && view.circ)) rerender();
   } catch(e){
     setSync(navigator.onLine === false ? "offline" : "error", String(e.message || e).slice(0, 90));
@@ -629,6 +702,7 @@ function allPhotoIds(job){
   ids.push(...(p.other || []));
   (job.obs || []).forEach(o => ids.push(...(o.photos || [])));
   if (job.portfolio) (job.portfolio.items || []).forEach(it => ids.push(...(it.photos || [])));
+  if (job.books) (job.books.exps || []).forEach(e => ids.push(...(e.photos || [])));
   return ids;
 }
 function missingPhotos(job){
@@ -689,6 +763,7 @@ async function addPhotos(target, files){
       const rec = { id, jobId: job.id, data: c.data, w: c.w, h: c.h, created: Date.now(), uploaded: false };
       await photoPut(rec); photoCache.set(id, c.data); pendingUploads.add(id); photoUploadsPending = pendingUploads.size;
       if (target.startsWith("obs:")) { const o = job.obs.find(x => x.id === target.slice(4)); if (o) { o.photos = o.photos || []; o.photos.push(id); } }
+      else if (target.startsWith("exp:")) { const e = job.books && job.books.exps.find(x => x.id === target.slice(4)); if (e) { e.photos = e.photos || []; e.photos.push(id); } }
       else if (target.startsWith("pf:")) { const it = job.portfolio && job.portfolio.items.find(x => x.id === target.slice(3)); if (it) { it.photos = it.photos || []; it.photos.push(id); } }
       else if (target === "other") p.other.push(id);
       else { (p.slots[target] = p.slots[target] || []).push(id); delete p.na[target]; }
@@ -706,6 +781,7 @@ function removePhoto(id){
   p.other = p.other.filter(x => x !== id);
   job.obs.forEach(o => o.photos = (o.photos || []).filter(x => x !== id));
   if (job.portfolio) job.portfolio.items.forEach(it => it.photos = (it.photos || []).filter(x => x !== id));
+  if (job.books) job.books.exps.forEach(e => e.photos = (e.photos || []).filter(x => x !== id));
   (job.photoDeletes = job.photoDeletes || []).push(id);
   photoDel(id); photoCache.delete(id);
   markDirty(job);
@@ -754,6 +830,10 @@ document.addEventListener("change", e => {
   if (nu) { const pj = portfolioJob(), it = pj && pj.portfolio.items.find(x => x.id === view.pfItem); if (it) { it.units = it.units || {}; it.units[nu.dataset.nvqunit] = nu.checked; markDirty(pj); } return; }
   const am = e.target.closest && e.target.closest("[data-am2e]");
   if (am) { tr().am2e[am.dataset.am2e] = am.checked; flush(); const h = am.closest(".card") && am.closest(".card").querySelector(".count"); if (h) { const box = am.closest(".card"); h.textContent = box.querySelectorAll("[data-am2e]:checked").length + "/" + box.querySelectorAll("[data-am2e]").length; } return; }
+  const pcf = e.target.closest && e.target.closest("[data-prevcert]");
+  if (pcf && pcf.files && pcf.files.length) { clearPhotoPending(); const fs = Array.from(pcf.files); pcf.value = ""; readPrevCert(fs); return; }
+  const pcs = e.target.closest && e.target.closest("select[data-pcb]");
+  if (pcs && view.pc) { view.pc.boards[+pcs.dataset.pcb].target = pcs.value; return; }
   const rb = e.target.closest && e.target.closest("[data-readboard]");
   if (rb && rb.files && rb.files[0]) { clearPhotoPending(); const f = rb.files[0]; readBoardFromFile(rb.dataset.readboard, f); rb.value = ""; return; }
   const rs = e.target.closest && e.target.closest("select[data-rb]");
@@ -1620,6 +1700,96 @@ async function nvqAi(kind){
   } catch(err){ const m2 = document.getElementById("nvqaimsg"); if (m2) m2.innerHTML = `<div class="errline">${esc(err.message || err)}</div>`; }
 }
 
+/* ---------------- mileage, expenses and year-end (owner only; one hidden synced record) */
+const EXP_CATS = ["Materials & stock","Tools & equipment","Van & travel","Clothing & PPE","Phone & internet","Insurance","Training & qualifications","Accountancy & legal","Advertising & website","Software & subscriptions","Bank charges","Other"];
+function booksJob(create){
+  let bj = jobs.find(x => x.type === "BOOKS" && !x.deleted);
+  if (!bj && create) { bj = { id: uid(), type: "BOOKS", created: Date.now(), updated: Date.now(), client: {}, boards: [], obs: [], insp: {}, photos: { slots: {}, na: {}, other: [] }, books: { trips: [], exps: [], vehicle: "" } }; jobs.push(bj); markDirty(bj); }
+  if (bj) { bj.books = bj.books || {}; bj.books.trips = bj.books.trips || []; bj.books.exps = bj.books.exps || []; }
+  return bj;
+}
+function taxYear(d){ const t = new Date((d || today()) + "T12:00:00"), y = t.getFullYear(), start = new Date(y + "-04-06T00:00:00"); return t >= start ? y : y - 1; }
+const tyLabel = y => `${y}/${String(y + 1).slice(2)}`;
+const inTY = (d, y) => !!d && taxYear(d) === y;
+function mileageAllowance(trips){ // HMRC approved rates for cars and vans: 45p for the first 10,000 business miles in the tax year, 25p after
+  const byVeh = {}; trips.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).forEach(t => { const v = t.vehicle || "Vehicle", m = (num(t.miles) || 0) * (t.ret === "Yes" ? 2 : 1); byVeh[v] = (byVeh[v] || 0) + m; });
+  let amt = 0, miles = 0; Object.values(byVeh).forEach(m => { miles += m; amt += Math.min(m, 10000) * 0.45 + Math.max(0, m - 10000) * 0.25; }); return { miles, amt, byVeh };
+}
+function booksYear(y){
+  const bj = booksJob(true), B = bj.books;
+  const trips = B.trips.filter(t => inTY(t.date, y)), exps = B.exps.filter(e => inTY(e.date, y));
+  const inv = liveJobs().filter(x => x.invoice && x.invoice.status !== "Draft" && inTY(x.invoice.date, y));
+  const income = inv.reduce((t, x) => t + totals(x.invoice.lines).sub, 0), paid = inv.filter(x => x.invoice.status === "Paid").reduce((t, x) => t + totals(x.invoice.lines).sub, 0);
+  const byCat = {}; exps.forEach(e => { byCat[e.cat || "Other"] = (byCat[e.cat || "Other"] || 0) + ((num(e.amount) || 0) - (settings.vatReg === "Yes" ? (num(e.vat) || 0) : 0)); });
+  const expTot = Object.values(byCat).reduce((a, b) => a + b, 0), mil = mileageAllowance(trips);
+  return { bj, trips, exps, inv, income, paid, byCat, expTot, mil, profit: income - expTot - mil.amt };
+}
+function renderBooks(){
+  if (!billingOk()) { view = {screen:"home"}; return renderHome(); }
+  const y = view.ty || taxYear(), Y = booksYear(y), bj = Y.bj; view.jobId = bj.id; loadJobPhotos(bj);
+  if (view.bk) return renderBookItem(bj);
+  const years = [taxYear() - 2, taxYear() - 1, taxYear()];
+  const vanFuel = Y.mil.miles && Y.exps.some(e => e.cat === "Van & travel" && /fuel|diesel|petrol/i.test((e.desc || "") + (e.supplier || "")));
+  return `<header class="top"><button class="iconbtn" data-act="money" aria-label="Back">←</button><h1>Mileage &amp; expenses<span class="sub">Tax year ${tyLabel(y)} (6 April – 5 April)</span></h1></header>
+  <main>
+    <div class="chips">${years.map(v => `<button class="chip small" data-act="tySet" data-v="${v}" aria-pressed="${v === y}">${tyLabel(v)}</button>`).join("")}</div>
+    <div class="card"><div class="bkgrid">
+      <div><span>Invoiced</span><b>${money(Y.income)}</b><em>${Y.inv.length} invoice${Y.inv.length === 1 ? "" : "s"} · ${money(Y.paid)} paid</em></div>
+      <div><span>Expenses</span><b>${money(Y.expTot)}</b><em>${Y.exps.length} receipt${Y.exps.length === 1 ? "" : "s"}${settings.vatReg === "Yes" ? " · ex VAT" : ""}</em></div>
+      <div><span>Mileage</span><b>${money(Y.mil.amt)}</b><em>${Math.round(Y.mil.miles).toLocaleString("en-GB")} business miles</em></div>
+      <div><span>Rough profit</span><b>${money(Y.profit)}</b><em>before tax – a guide, not a tax figure</em></div></div>
+      ${vanFuel ? `<div class="warnline small">You've logged fuel as an expense <b>and</b> claimed mileage. For any one vehicle HMRC lets you use the mileage rate <b>or</b> actual costs, not both – ask your accountant which suits you.</div>` : ""}</div>
+    <div class="row"><button class="btn" data-act="bkNew" data-k="trip">+ Trip</button><button class="btn" data-act="bkNew" data-k="exp">+ Expense</button><button class="btn ghost" data-act="bkJobTrip">Trip to a job</button></div>
+    ${view.bkPick ? `<div class="presets">${liveJobs().filter(x => !x.example && x.address).sort((a, b) => String(b.inspDate).localeCompare(String(a.inspDate))).slice(0, 20).map(x => `<button class="card-link" data-act="bkUseJob" data-id="${esc(x.id)}"><div class="grow"><div class="t">${esc(jobTitle(x))}</div><div class="d">${esc(TYPES[typeOf(x)])} · ${esc(ukDate(x.inspDate))}</div></div></button>`).join("") || `<div class="muted small">No jobs with an address yet.</div>`}</div>` : ""}
+    <div class="card"><h2>Trips <span class="count">${Y.trips.length}</span></h2>${Y.trips.length ? Y.trips.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).map(t => `<button class="card-link" data-act="bkOpen" data-k="trip" data-id="${esc(t.id)}"><div class="grow"><div class="t">${esc(t.to || "Trip")}</div><div class="d">${esc(ukDate(t.date))} · ${esc(t.purpose || "")}</div></div><b>${(num(t.miles) || 0) * (t.ret === "Yes" ? 2 : 1)} mi</b></button>`).join("") : `<div class="muted small">No trips logged this year.</div>`}</div>
+    <div class="card"><h2>Expenses <span class="count">${Y.exps.length}</span></h2>${Y.exps.length ? Y.exps.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).map(e => `<button class="card-link" data-act="bkOpen" data-k="exp" data-id="${esc(e.id)}"><div class="grow"><div class="t">${esc(e.supplier || e.desc || "Expense")}</div><div class="d">${esc(ukDate(e.date))} · ${esc(e.cat || "")}${(e.photos || []).length ? " · receipt ✓" : " · no receipt"}</div></div><b>${money(e.amount)}</b></button>`).join("") : `<div class="muted small">No expenses logged this year.</div>`}</div>
+    ${Object.keys(Y.byCat).length ? `<div class="card"><h2>By category</h2>${Object.entries(Y.byCat).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="row small"><span>${esc(k)}</span><span class="spacer"></span><b>${money(v)}</b></div>`).join("")}</div>` : ""}
+    <div class="card"><h2>Year end</h2><div class="muted small">Everything for ${tyLabel(y)} in files your accountant can open in Excel, plus a printable summary with your receipts.</div>
+      <div class="row"><button class="btn sm" data-act="bkCsv" data-k="all">Download spreadsheet files</button><button class="btn ghost sm" data-act="bkPrint">Print summary &amp; receipts</button></div>
+      <div class="muted small">Making Tax Digital for Income Tax is being phased in for sole traders by income level – check with your accountant whether and when it applies to you and which software they'll submit with.</div></div>
+    <div class="card"><h2>Vehicle</h2>${field("Default vehicle for trips","job.books.vehicle",{ph:"e.g. VW Caddy van"})}</div>
+  </main>`;
+}
+function renderBookItem(bj){
+  const B = bj.books, k = view.bk.k, arr = k === "trip" ? B.trips : B.exps, i = arr.findIndex(x => x.id === view.bk.id), it = arr[i];
+  if (!it) { view.bk = null; return renderBooks(); }
+  const b = `job.books.${k === "trip" ? "trips" : "exps"}.${i}.`;
+  const body = k === "trip"
+    ? `<div class="card"><div class="grid2">${field("Date", b + "date", {type:"date"})}${field("Miles (one way)", b + "miles", {num:true, unit:"mi"})}</div>
+        ${chips("Return trip", b + "ret", ["Yes","No"], {small:true})}
+        <div class="grid2">${field("From", b + "from", {ph:"Home / yard"})}${field("To", b + "to")}</div>
+        ${field("Purpose", b + "purpose", {ph:"e.g. EICR at 12 High St"})}${field("Vehicle", b + "vehicle", {ph: B.vehicle || "Van"})}
+        <div class="muted small">Business miles are claimed at 45p a mile for the first 10,000 in the tax year and 25p after (HMRC rates for cars and vans).</div></div>`
+    : `<div class="card"><div class="grid2">${field("Date", b + "date", {type:"date"})}${field("Amount paid", b + "amount", {num:true, unit:"£"})}</div>
+        <div class="grid2">${field("Supplier", b + "supplier", {ph:"e.g. CEF, Screwfix"})}${settings.vatReg === "Yes" ? field("VAT included", b + "vat", {num:true, unit:"£"}) : field("What for", b + "desc")}</div>
+        ${settings.vatReg === "Yes" ? field("What for", b + "desc") : ""}
+        ${chips("Category", b + "cat", EXP_CATS, {small:true})}
+        ${chips("Paid by", b + "paid", ["Business account","Card","Cash","Personal"], {small:true})}
+        ${field("Notes", b + "notes", {ph:"Job it was for, etc."})}</div>
+      <div class="card"><h2>Receipt</h2><div class="muted small">Photograph the receipt – HMRC expects you to keep records for at least 5 years after the tax return deadline.</div>${thumbs(it.photos || [], "exp:" + it.id)}</div>`;
+  return `<header class="top"><button class="iconbtn" data-act="bkBack" aria-label="Back">←</button><h1>${k === "trip" ? "Trip" : "Expense"}<span class="sub">${esc(ukDate(it.date))}</span></h1></header>
+  <main>${body}<div class="row"><button class="btn" data-act="bkBack">Done</button><span class="spacer"></span>${view.confirmDel === "bk" ? `<button class="btn danger sm" data-act="bkDel">Delete it</button><button class="btn ghost sm" data-act="cancelDel">Keep</button>` : `<button class="btn ghost sm" data-act="askDel" data-what="bk">Delete</button>`}</div></main>`;
+}
+function booksCsv(y){
+  const Y = booksYear(y), q = v => { const t = String(v ?? ""); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; }, line = r => r.map(q).join(",");
+  const trips = [["Date","From","To","Purpose","Vehicle","Miles"].join(",")].concat(Y.trips.sort((a, b) => String(a.date).localeCompare(String(b.date))).map(t => line([t.date, t.from, t.to, t.purpose, t.vehicle || Y.bj.books.vehicle, (num(t.miles) || 0) * (t.ret === "Yes" ? 2 : 1)])));
+  trips.push(line(["","","","Total business miles","", Math.round(Y.mil.miles)]), line(["","","","Allowance at HMRC rates (£)","", Y.mil.amt.toFixed(2)]));
+  const exps = [["Date","Supplier","Description","Category","Amount (£)","VAT (£)","Paid by","Receipt photo","Notes"].join(",")].concat(Y.exps.sort((a, b) => String(a.date).localeCompare(String(b.date))).map(e => line([e.date, e.supplier, e.desc, e.cat, (num(e.amount) || 0).toFixed(2), e.vat ? (num(e.vat) || 0).toFixed(2) : "", e.paid, (e.photos || []).length ? "Yes" : "No", e.notes])));
+  const inc = [["Invoice date","Invoice no.","Customer","Job","Net (£)","VAT (£)","Total (£)","Status","Date paid"].join(",")].concat(Y.inv.sort((a, b) => String(a.invoice.date).localeCompare(String(b.invoice.date))).map(x => { const t = totals(x.invoice.lines); return line([x.invoice.date, x.invoice.number, (x.client || {}).name, jobTitle(x), t.sub.toFixed(2), t.vat.toFixed(2), t.total.toFixed(2), x.invoice.status, x.invoice.paidDate || ""]); }));
+  return { trips: trips.join("\r\n") + "\r\n", exps: exps.join("\r\n") + "\r\n", inc: inc.join("\r\n") + "\r\n" };
+}
+function booksPrintHtml(y){
+  const Y = booksYear(y), co = settings;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Year end ${tyLabel(y)}</title><style>${REPORT_CSS}.rc{display:flex;flex-wrap:wrap;gap:8px}.rc figure{margin:0;width:31%;font-size:10px}.rc img{width:100%;border:1px solid #ccc}</style></head><body>
+${band(co, false)}<div class="sub">Year-end summary – tax year ${tyLabel(y)} (6 April ${y} – 5 April ${y + 1})</div>
+<table class="kv"><tbody><tr><th>Invoiced (net)</th><td>${money(Y.income)}</td><th>Of which paid</th><td>${money(Y.paid)}</td></tr><tr><th>Expenses${settings.vatReg === "Yes" ? " (ex VAT)" : ""}</th><td>${money(Y.expTot)}</td><th>Mileage allowance</th><td>${money(Y.mil.amt)} (${Math.round(Y.mil.miles)} miles)</td></tr><tr><th>Rough profit</th><td colspan="3">${money(Y.profit)} – before tax; for your accountant to confirm</td></tr></tbody></table>
+<h2>Expenses by category</h2><table class="kv"><tbody>${Object.entries(Y.byCat).map(([k, v]) => `<tr><th>${esc(k)}</th><td>${money(v)}</td></tr>`).join("") || "<tr><td>None</td></tr>"}</tbody></table>
+<h2>Expenses</h2><table class="sched"><thead><tr><th>Date</th><th>Supplier</th><th>What for</th><th>Category</th><th>Amount</th><th>Receipt</th></tr></thead><tbody>${Y.exps.map(e => `<tr><td>${esc(ukDate(e.date))}</td><td>${esc(e.supplier || "")}</td><td>${esc(e.desc || "")}</td><td>${esc(e.cat || "")}</td><td>${money(e.amount)}</td><td>${(e.photos || []).length ? "✓" : ""}</td></tr>`).join("")}</tbody></table>
+<h2>Trips</h2><table class="sched"><thead><tr><th>Date</th><th>To</th><th>Purpose</th><th>Miles</th></tr></thead><tbody>${Y.trips.map(t => `<tr><td>${esc(ukDate(t.date))}</td><td>${esc(t.to || "")}</td><td>${esc(t.purpose || "")}</td><td>${(num(t.miles) || 0) * (t.ret === "Yes" ? 2 : 1)}</td></tr>`).join("")}</tbody></table>
+${Y.exps.some(e => (e.photos || []).length) ? `<h2 style="page-break-before:always">Receipts</h2><div class="rc">${Y.exps.flatMap(e => (e.photos || []).map(id => photoCache.get(id) ? `<figure><img src="${photoCache.get(id)}" alt=""><figcaption>${esc(ukDate(e.date))} ${esc(e.supplier || "")} ${money(e.amount)}</figcaption></figure>` : "")).join("")}</div>` : ""}
+</body></html>`;
+}
+
 /* ---------------- customers (built from the jobs) */
 function custKey(j){ const c = j.client || {}; return (String(c.name || "").trim().toLowerCase().replace(/\s+/g, " ") || String(c.email || "").trim().toLowerCase() || String(c.phone || "").replace(/\D/g, "") || "addr:" + normAddr(j.address || "")); }
 function customers(){
@@ -1853,6 +2023,138 @@ async function askGo(){
     settings.askDraft = ""; lsWrite();
   } catch(err){ askBusy = false; rerender(); const m2 = document.getElementById("askmsg"); if (m2) m2.innerHTML = `<div class="errline">${esc(/Unknown action/i.test(err.message) ? "Your Google script needs updating – paste in the new script and redeploy." : err.message)}</div>`; return; }
   askBusy = false; rerender();
+}
+
+/* ---------------- previous certificate: read the old schedule from photos, keep old readings, flag what's worse */
+function devFromText(t, curve){
+  const s = String(t || ""), k = (String(curve || "").toUpperCase().match(/[BCD]/) || s.toUpperCase().match(/\b([BCD])\s?\d/) || s.toUpperCase().match(/TYPE\s?([BCD])/) || [])[1] || (String(curve || "").toUpperCase().match(/^[BCD]$/) ? curve.toUpperCase() : "");
+  if (/RCBO|61009/i.test(s)) return "BS EN 61009 RCBO Type " + (k || "B");
+  if (/MCB|60898|^\s*[BCD]\s?\d/i.test(s) || k) return "BS EN 60898 MCB Type " + (k || "B");
+  if (/88-?3|1361/i.test(s)) return "BS 88-3 fuse";
+  if (/88-?2|gG|HRC/i.test(s)) return "BS 88-2 gG fuse";
+  if (/3036|rewire|semi/i.test(s)) return "BS 3036 rewireable fuse";
+  if (/1362/i.test(s)) return "BS 1362 plug fuse";
+  return "";
+}
+const pnum = v => { if (v == null) return null; const m = String(v).replace(",", ".").match(/[\d.]+/); if (!m) return String(v).includes(">") ? 999 : null; const n = parseFloat(m[0]); return isNaN(n) ? null : (String(v).includes(">") ? Math.max(n, 999) : n); };
+function prevFlags(c){
+  const p = c.prev; if (!p) return [];
+  const out = [], cz = pnum(c.zs), pz = pnum(p.zs), cr = pnum(c.r12), pr = pnum(p.r12), ci = Math.min(pnum(c.irle) ?? 9999, pnum(c.irll) ?? 9999), pi = Math.min(pnum(p.irle) ?? 9999, pnum(p.irll) ?? 9999), ct = pnum(c.rcdt), pt = pnum(p.rcdt);
+  if (cz !== null && pz !== null && cz > pz * 1.2 && cz - pz >= 0.1) out.push(`Zs up from ${pz} to ${cz} Ω`);
+  if (cr !== null && pr !== null && cr > pr * 1.2 && cr - pr >= 0.1) out.push(`R1+R2 up from ${pr} to ${cr} Ω`);
+  if (ci < 9999 && pi < 9999 && ci < pi / 2 && ci < 50) out.push(`insulation down from ${pi >= 999 ? ">999" : pi} to ${ci} MΩ`);
+  if (ct !== null && pt !== null && ct > pt * 1.5 && ct - pt >= 10) out.push(`RCD slower: ${pt} → ${ct} ms`);
+  return out;
+}
+function prevCertCard(job, b){
+  if (job.example || typeOf(job) !== "EICR") return "";
+  return `<div class="card readcard"><div class="row"><b style="flex:1">Previous certificate</b>${pill("none","needs signal")}</div>
+    <div class="muted small">Photograph the schedule of test results from the last EICR or EIC (up to 4 pages). It fills in the circuits and keeps the old readings, so anything that's got noticeably worse is flagged as you test.</div>
+    <div class="row"><label class="btn ghost sm" for="pc-gal">Choose photos</label><input type="file" id="pc-gal" data-prevcert="1" accept="image/*" multiple hidden>
+    <label class="btn ghost sm" for="pc-cam">Take a photo</label><input type="file" id="pc-cam" data-prevcert="1" accept="image/*" capture="environment" hidden></div>
+    <div id="pcmsg"></div></div>`;
+}
+async function readPrevCert(files){
+  const job = j(), say = h => { const e = document.getElementById("pcmsg"); if (e) e.innerHTML = h; };
+  if (!settings.sendUrl) { say(`<div class="errline">Set up sync first – the photos are read through your Google script.</div>`); return; }
+  if (navigator.onLine === false) { say(`<div class="warnline">No signal – try again when you have signal.</div>`); return; }
+  const imgs = [];
+  for (const f of Array.from(files).slice(0, 4)) { try { const c = await compressImage(f); imgs.push({ data: c.data.split(",")[1], mediaType: "image/jpeg" }); } catch(e){} }
+  if (!imgs.length) { say(`<div class="errline">Couldn't read those photos.</div>`); return; }
+  say(`<div class="muted small"><span class="pulse"></span> Reading ${imgs.length} page${imgs.length === 1 ? "" : "s"}… (30–60 seconds)</div>`);
+  const system = "You read photos of UK electrical certificates (EICR / EIC schedules of circuit details and test results, BS 7671 model forms) and transcribe them exactly. Copy values as written; use null for blank, illegible or N/A cells – never guess. Reply with JSON only.";
+  const question = `Transcribe every circuit row on these schedule pages. Return {"date":"inspection date if shown","boards":[{"ref":"DB reference","location":"","circuits":[{"no":"","desc":"","wiring":"type code letter","ref":"reference method","points":"","live":"live csa mm2","cpc":"cpc csa mm2","device":"BS (EN) / type as written","curve":"B|C|D if shown","rating":"A","ka":"","rcd_ma":"","rcd_type":"","r1":"","rn":"","r2":"","r12":"(R1+R2)","ir_ll":"","ir_le":"","zs":"measured Zs","rcd_ms":""}]}],"notes":"anything unclear"}.`;
+  try {
+    const o = await api("ask", { question, system, images: imgs, maxTokens: 8000 });
+    const mm = String(o.answer || "").match(/\{[\s\S]*\}/); if (!mm) throw new Error("Nothing readable came back – try clearer, flatter photos in good light.");
+    const d = JSON.parse(mm[0]);
+    const boards = (d.boards || []).filter(bd => (bd.circuits || []).length).map((bd, k) => ({ ref: String(bd.ref || ""), location: String(bd.location || ""), use: true,
+      target: k === 0 ? String(view.board || 0) : "new", rows: bd.circuits.map(c => Object.assign({ use: true }, c)) }));
+    if (!boards.length) throw new Error("No circuits found – photograph the schedule of test results page, flat and in focus.");
+    view.pc = { date: String(d.date || ""), notes: String(d.notes || ""), boards }; view.tab = "prevcert"; view.circ = null; render();
+  } catch(err){ say(`<div class="errline">${esc(err.message || err)}</div>`); }
+}
+function tabPrevCert(){
+  const job = j(), pc = view.pc; if (!pc) { view.tab = "circuits"; return tabCircuits(); }
+  const v = x => x == null || x === "" ? "–" : esc(String(x));
+  return `<div class="card"><h2>Check the old certificate${pc.date ? ` – ${esc(pc.date)}` : ""}</h2>
+    <div class="muted small">Read from your photos. Untick anything that's wrong or no longer there, and check the device and rating on each – they set the Zs limits.</div>
+    ${pc.notes ? `<div class="warnline small">${esc(pc.notes)}</div>` : ""}</div>
+  ${pc.boards.map((bd, bi) => `<div class="card"><h2>${esc(bd.ref || "Board " + (bi + 1))}${bd.location ? ` <span class="count">${esc(bd.location)}</span>` : ""}</h2>
+    <label class="field"><span>Put these circuits on</span><select data-pcb="${bi}" data-k="target">${job.boards.map((x, i) => `<option value="${i}"${bd.target === String(i) ? " selected" : ""}>${esc(x.ref || "DB" + (i + 1))} (${x.circuits.length ? "update its " + x.circuits.length + " circuits in order" : "empty"})</option>`).join("")}<option value="new"${bd.target === "new" ? " selected" : ""}>A new board</option><option value="skip"${bd.target === "skip" ? " selected" : ""}>Don't import this board</option></select></label>
+    ${bd.rows.map((r, ri) => `<div class="pcrow${r.use ? "" : " off"}"><button type="button" class="chip small" data-act="pcUse" data-b="${bi}" data-r="${ri}" aria-pressed="${r.use}">${r.use ? "✓" : "–"}</button>
+      <div class="grow"><div><b>${v(r.no)}</b> ${v(r.desc)}</div><div class="small">${esc(devShort({dev: devFromText(r.device, r.curve), rating: r.rating}))}${r.live ? ` · ${v(r.live)}/${v(r.cpc)} mm²` : ""}${r.rcd_ma ? ` · ${v(r.rcd_ma)} mA` : ""}</div>
+      <div class="small muted">Last time: Zs ${v(r.zs)} · R1+R2 ${v(r.r12)} · IR ${v(r.ir_le)} · RCD ${v(r.rcd_ms)} ms</div></div></div>`).join("")}</div>`).join("")}
+  <div class="card"><div class="row"><button class="btn" data-act="pcApply">Fill in the circuits</button><button class="btn ghost" data-act="pcCancel">Cancel</button></div>
+    <div class="muted small">Descriptions, devices, ratings and cable sizes are filled in; the old readings are kept alongside, not used as this inspection's results.</div></div>`;
+}
+function applyPrevCert(){
+  const job = j(), pc = view.pc; if (!pc) return; let n = 0;
+  pc.boards.forEach(bd => {
+    if (bd.target === "skip") return;
+    let b = bd.target === "new" ? null : job.boards[+bd.target];
+    if (!b) { b = newBoard(job.boards.length + 1); if (bd.ref) b.ref = bd.ref; b.location = bd.location || ""; job.boards.push(b); }
+    const rows = bd.rows.filter(r => r.use);
+    rows.forEach((r, i) => {
+      let c = b.circuits[i]; if (!c) { c = newCircuit(b.circuits.length + 1); b.circuits.push(c); }
+      if (r.no) c.no = String(r.no); if (r.desc) c.desc = String(r.desc);
+      const dev = devFromText(r.device, r.curve); if (dev && !c.dev) c.dev = dev; if (r.rating && !c.rating) c.rating = String(pnum(r.rating) ?? r.rating);
+      [["live","live"],["cpc","cpc"],["points","pts"],["wiring","wtype"],["ref","ref"],["ka","ka"]].forEach(([from, to]) => { if (r[from] != null && r[from] !== "" && !c[to]) c[to] = String(r[from]); });
+      if (r.rcd_ma && !c.rcd) c.rcd = String(pnum(r.rcd_ma) ?? ""); if (r.rcd_type && !c.rcdType && RCD_TYPES.includes(r.rcd_type)) c.rcdType = r.rcd_type;
+      c.prev = { date: pc.date, zs: r.zs ?? "", r12: r.r12 ?? "", irll: r.ir_ll ?? "", irle: r.ir_le ?? "", rcdt: r.rcd_ms ?? "", r1: r.r1 ?? "", rn: r.rn ?? "", r2: r.r2 ?? "" };
+      n++;
+    });
+  });
+  if (pc.date && !job.lastInsp) job.lastInsp = pc.date;
+  markDirty(job); view.pc = null; view.tab = "circuits"; render();
+  toast(`${n} circuit${n === 1 ? "" : "s"} filled in from the old certificate – check each one as you test`);
+}
+function prevCard(c){
+  if (!c.prev) return "";
+  const p = c.prev, fl = prevFlags(c), v = x => x == null || x === "" ? "–" : esc(String(x));
+  return `<div class="card ${fl.length ? "prevbad" : ""}"><h2>Last inspection${p.date ? ` <span class="count">${esc(p.date)}</span>` : ""}</h2>
+    <div class="small">Zs ${v(p.zs)} Ω · R1+R2 ${v(p.r12)} Ω · IR L–E ${v(p.irle)} MΩ · RCD ${v(p.rcdt)} ms</div>
+    ${fl.length ? `<div class="warnline small"><b>Worse than last time:</b> ${esc(fl.join("; "))}. Worth finding out why – loose connection, damage or added load.</div>` : ""}</div>`;
+}
+function changesCard(job){
+  const rows = []; job.boards.forEach(b => b.circuits.forEach(c => { const f = prevFlags(c); if (f.length) rows.push(`<div class="small"><b>${esc(b.ref)} cct ${esc(c.no)}</b> ${esc(c.desc || "")}: ${esc(f.join("; "))}</div>`); }));
+  return rows.length ? `<div class="card prevbad"><h2>Worse than the last inspection (${rows.length})</h2>${rows.join("")}<div class="muted small">Consider whether any of these need an observation or further investigation.</div></div>` : "";
+}
+
+/* ---------------- AI suggestion for an observation's code */
+const aiSug = {};
+function aiCodeBlock(o){
+  const g = aiSug[o.id];
+  if (!g) return `<button class="btn ghost sm" data-act="aiCode" data-id="${esc(o.id)}">Suggest a code (AI)</button>`;
+  if (g.busy) return `<div class="muted small"><span class="pulse"></span> Thinking about the code…</div>`;
+  if (g.err) return `<div class="errline small">${esc(g.err)}</div><button class="btn ghost sm" data-act="aiCode" data-id="${esc(o.id)}">Try again</button>`;
+  const cls = g.code === "C1" || g.code === "C2" ? "fail" : g.code === "FI" ? "check" : "none";
+  return `<div class="aisug"><div class="row">${pill(cls, "Suggested " + g.code)}${g.conf ? `<span class="small muted">${esc(g.conf)} confidence</span>` : ""}<span class="spacer"></span>
+      ${o.code === g.code ? pill("pass","Using it") : `<button class="btn sm" data-act="aiCodeUse" data-id="${esc(o.id)}">Use ${esc(g.code)}</button>`}<button class="btn ghost sm" data-act="aiCodeX" data-id="${esc(o.id)}">Dismiss</button></div>
+    <div class="small">${esc(g.reason)}</div>${g.reg ? `<div class="small muted">Ref: ${esc(g.reg)}</div>` : ""}${g.check ? `<div class="small"><b>Check:</b> ${esc(g.check)}</div>` : ""}
+    <div class="muted small">A suggestion only – the code is your call as the inspector.</div></div>`;
+}
+async function aiCode(obsId){
+  const job = j(), o = job.obs.find(x => x.id === obsId); if (!o) return;
+  if (!String(o.text || "").trim() && !(o.photos || []).length) { aiSug[obsId] = { err: "Describe the defect or add a photo first." }; rerender(); return; }
+  if (!settings.sendUrl) { aiSug[obsId] = { err: "Set up sync first – the AI works through your Google script." }; rerender(); return; }
+  aiSug[obsId] = { busy: true }; rerender();
+  // ground it in the app's own coding guide
+  const words = String(o.text || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(w => w.length > 3);
+  const guide = (window.BF_CODES || []).map(x => [x, words.filter(w => (x.t + " " + x.k).toLowerCase().includes(w)).length]).filter(x => x[1]).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([x]) => `- ${x.c}: ${x.t}`).join("\n");
+  const b = job.boards.find(bb => String(o.loc || "").includes(bb.ref));
+  const ctx = [`Installation: ${job.premises || "unknown premises"}, earthing ${job.supply.earth || "unknown"}.`, o.loc ? `Location / circuit: ${o.loc}.` : "", b ? `Board ${b.ref}: ${b.circuits.length} circuits.` : ""].filter(Boolean).join(" ");
+  const images = (o.photos || []).slice(0, 2).map(id => photoCache.get(id)).filter(Boolean).map(d => ({ data: d.split(",")[1], mediaType: "image/jpeg" }));
+  const system = "You help a UK electrical inspector classify an EICR observation using Electrical Safety First Best Practice Guide 4 and BS 7671:2018+A2:2022. C1 = danger present, immediate action. C2 = potentially dangerous, urgent remedial action. C3 = improvement recommended. FI = further investigation required without delay. Judge on the risk as described; if key information is missing, say what to check. Reply with JSON only: {\"code\":\"C1|C2|C3|FI\",\"reason\":\"one or two plain sentences\",\"reg\":\"regulation number(s) if certain, else empty\",\"confidence\":\"high|medium|low\",\"check\":\"what to confirm on site, or empty\"}.";
+  const question = `${ctx}\nObservation: ${o.text || "(see photo)"}\n${guide ? "Entries from the inspector's coding guide that may be relevant:\n" + guide : ""}`;
+  try {
+    const r = await api("ask", { question, system, images, maxTokens: 600 });
+    const mm = String(r.answer || "").match(/\{[\s\S]*\}/); if (!mm) throw new Error("No suggestion came back – try again.");
+    const d = JSON.parse(mm[0]); const code = String(d.code || "").toUpperCase();
+    if (!["C1","C2","C3","FI"].includes(code)) throw new Error("The AI couldn't settle on a code – use the coding guide for this one.");
+    aiSug[obsId] = { code, reason: String(d.reason || ""), reg: String(d.reg || ""), conf: String(d.confidence || ""), check: String(d.check || "") };
+  } catch(err){ aiSug[obsId] = { err: String(err.message || err) }; }
+  view.keepScroll = true; rerender();
 }
 
 /* ---------------- read a board from a photo (AI via the Google script) */
@@ -2127,8 +2429,9 @@ function renderMoney(){
   const open = qs.filter(x => ["Draft","Sent"].includes(x.quote.status || "Draft")), pipe = open.reduce((t, x) => t + totals(x.quote.lines).total, 0);
   const row = (x, kind) => { const d = x[kind]; const st = kind === "quote" ? (d.status || "Draft") : (d.status || "Unpaid");
     return `<button class="card-link" data-act="openDoc" data-id="${esc(x.id)}" data-kind="${kind}"><div class="grow"><div class="t">${esc(jobTitle(x))}</div><div class="d">${esc(d.number || "")} · ${esc(ukDate(kind === "quote" ? d.created : d.date))}</div></div><div style="text-align:right"><b>${money(totals(d.lines).total)}</b><br>${pill(st === "Paid" || st === "Accepted" ? "pass" : st === "Declined" ? "fail" : st === "Draft" ? "none" : "check", st)}</div></button>`; };
-  return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Quotes &amp; invoices</h1></header>
-  <main><div class="codes" style="grid-template-columns:1fr 1fr"><div><b>${money(owed)}</b><span>owed (${unpaid.length} unpaid)</span></div><div><b>${money(pipe)}</b><span>in open quotes (${open.length})</span></div></div>
+  return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Money</h1></header>
+  <main><button class="card-link" data-act="books"><div class="grow"><div class="t">Mileage, expenses &amp; year end</div><div class="d">Log trips and receipts · tax-year totals · files for your accountant</div></div></button>
+    <div class="codes" style="grid-template-columns:1fr 1fr"><div><b>${money(owed)}</b><span>owed (${unpaid.length} unpaid)</span></div><div><b>${money(pipe)}</b><span>in open quotes (${open.length})</span></div></div>
     <div class="card"><h2>Invoices <span class="count">${inv.length}</span></h2>${inv.length ? inv.map(x => row(x, "invoice")).join("") : `<div class="muted small">None yet – create one from any job's ${"Report / Certify"} tab.</div>`}</div>
     <div class="card"><h2>Quotes <span class="count">${qs.length}</span></h2>${qs.length ? qs.map(x => row(x, "quote")).join("") : `<div class="muted small">None yet – create one from an EICR's Report tab.</div>`}</div></main>`;
 }
@@ -2314,6 +2617,7 @@ var KEY = "${settings.sendKey}";
 var OFFICE = "${settings.officeEmail}";
 var FOLDER_NAME = "BlueForge EICR";   // created in your Google Drive on first use. To use a shared drive folder, put its ID in FOLDER_ID below.
 var FOLDER_ID = "";
+var SCRIPT_VERSION = 5;            // the app checks this and tells you when the script needs updating
 var AI_MODEL = "claude-sonnet-5-5";   // model used to read board photos – change here if Anthropic retires it
 var ASK_SYSTEM = "You are a senior UK electrical inspector helping an experienced electrician (NVQ, 2391) working in North Wales. " +
   "Answer questions about BS 7671:2018+A4:2026 (18th Edition, IET Wiring Regulations), the On-Site Guide, Guidance Note 3, Building Regulations Part P (Wales), EICR coding (Electrical Safety First Best Practice Guide 4), testing and inspection, and practical installation. " +
@@ -2350,7 +2654,24 @@ function doPost(e) {
       if (d.action === "revokeDevice" || d.action === "restoreDevice") { if (devs[d.id]) { devs[d.id].revoked = d.action === "revokeDevice"; P.setProperty("devices", JSON.stringify(devs)); } return reply({ok: true}); }
       if (d.action === "rotateKey") { if (!/^bf-[a-z0-9]{12,}$/.test(d.newKey || "")) return reply({ok: false, error: "Bad key"}); P.setProperty("key", d.newKey); return reply({ok: true}); }
     }
-    if (d.action === "ping") return reply({ok: true, ai: !!P.getProperty("aiKey")});
+    if (d.action === "ping") return reply({ok: true, ai: !!P.getProperty("aiKey"), version: SCRIPT_VERSION});
+    if (d.action === "backupSave") {
+      var bf = sub_("Backups"), bname = String(d.name || "backup.json").replace(/[^A-Za-z0-9 ._()-]/g, "");
+      var bfile = bf.createFile(bname, String(d.json || ""), "application/json");
+      var all = [], it2 = bf.getFiles(); while (it2.hasNext()) { var f2 = it2.next(); if (!f2.isTrashed()) all.push(f2); }
+      all.sort(function (a, b) { return b.getDateCreated() - a.getDateCreated(); });
+      all.slice(8).forEach(function (f3) { f3.setTrashed(true); });
+      return reply({ok: true, id: bfile.getId(), name: bname, size: bfile.getSize()});
+    }
+    if (d.action === "backupList") {
+      var bl = [], it3 = sub_("Backups").getFiles(); while (it3.hasNext()) { var f4 = it3.next(); if (!f4.isTrashed()) bl.push({id: f4.getId(), name: f4.getName(), size: f4.getSize(), created: f4.getDateCreated().getTime()}); }
+      bl.sort(function (a, b) { return b.created - a.created; });
+      return reply({ok: true, backups: bl});
+    }
+    if (d.action === "backupGet") {
+      var f5 = DriveApp.getFileById(String(d.id || "")); if (!f5 || f5.getParents().next().getName() !== "Backups") return reply({ok: false, error: "Backup not found"});
+      return reply({ok: true, json: f5.getBlob().getDataAsString()});
+    }
     if (d.action === "setAiKey") {
       if (!isOwner) return reply({ok: false, error: "Only the owner can set the AI key"});
       var nk2 = String(d.aiKey || "").trim();
@@ -2362,7 +2683,9 @@ function doPost(e) {
       var ak2 = P.getProperty("aiKey");
       if (!ak2) return reply({ok: false, error: "The AI isn't set up yet – the owner adds the AI key in Settings > Owner access"});
       var msgs = (d.history || []).slice(-6).reduce(function (a, h) { if (h && h.q && h.a) { a.push({role: "user", content: String(h.q).slice(0, 2000)}); a.push({role: "assistant", content: String(h.a).slice(0, 4000)}); } return a; }, []);
-      msgs.push({role: "user", content: String(d.question || "").slice(0, 3000)});
+      var qtext = String(d.question || "").slice(0, 8000);
+      if (d.images && d.images.length) { var parts = d.images.slice(0, 4).map(function (im) { return {type: "image", source: {type: "base64", media_type: im.mediaType || "image/jpeg", data: im.data}}; }); parts.push({type: "text", text: qtext}); msgs.push({role: "user", content: parts}); }
+      else msgs.push({role: "user", content: qtext});
       var r2 = UrlFetchApp.fetch("https://api.anthropic.com/v1/messages", {method: "post", contentType: "application/json",
         headers: {"x-api-key": ak2, "anthropic-version": "2023-06-01"}, payload: JSON.stringify({model: AI_MODEL, max_tokens: d.maxTokens || 1500, system: d.system || ASK_SYSTEM, messages: msgs}), muteHttpExceptions: true});
       var c2 = r2.getResponseCode(), t2 = r2.getContentText();
@@ -2538,6 +2861,7 @@ const icon = n => ({
 
 /* ------------------------------------------------------------------ derived blocks (live-updated) */
 const DERIVED = {
+  prevc(){ const c = curCirc(); return c ? prevCard(c) : ""; },
   design(){
     const j = curJob(), b = curBoard(), c = curCirc(); if (!c) return "";
     const r = calcCircuit(j, b, c);
@@ -2587,6 +2911,7 @@ function render(){
   else if (view.screen === "train") html = renderTrain();
   else if (view.screen === "customers") html = renderCustomers();
   else if (view.screen === "nvq") html = renderNvq();
+  else if (view.screen === "books") html = renderBooks();
   else if (view.screen === "customer") html = renderCustomer();
   else if (view.screen === "quiz" && view.quiz) { html = renderQuiz(); if (view.quiz.limitMin && !view.quiz.done) setTimeout(tickQuiz, 0); }
   else if (view.screen === "am2e") html = renderAm2e();
@@ -2640,6 +2965,7 @@ function renderHome(){
       ${Object.entries(FORMS).map(([k, f]) => `<button class="card-link" data-act="newType" data-type="${esc(k)}"><div class="grow"><div class="t">${esc(f.name)}</div><div class="d">${esc(f.long)} · ${esc(f.std || "")}</div></div></button>`).join("")}
       <button class="btn ghost sm" data-act="chooserOff">Cancel</button></div>`
       : `<button class="btn block" data-act="chooser">+ New</button>`}
+    ${scriptBanner()}
     ${ready ? `<div class="warnline">${ready} job${ready === 1 ? "" : "s"} ready for your sign-off.</div>` : ""}
     <section class="hgrp"><h3>On site</h3><div class="tiles t3">
       <button class="tile" data-act="book"><b>Handbook</b><span>Tables, tests, calculators</span></button>
@@ -2652,7 +2978,7 @@ function renderHome(){
     </div>
     <section class="hgrp"><h3>Business</h3><div class="tiles t3" style="grid-template-columns:repeat(${billingOk() ? 3 : 2},minmax(0,1fr))">
       <button class="tile" data-act="customers"><b>Customers</b><span>Contacts &amp; history</span></button>
-      ${billingOk() ? `<button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>` : ""}
+      ${billingOk() ? `<button class="tile" data-act="money"><b>Money</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>` : ""}
       <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} to chase</span></button>
     </div></section>
     <section class="hgrp"><h3>Learn</h3><div class="tiles t3" style="grid-template-columns:repeat(2,minmax(0,1fr))">
@@ -2680,6 +3006,7 @@ function renderSettings(){
       ${field("Sync link (Google script web app URL)","settings.sendUrl",{ph:"https://script.google.com/macros/s/…/exec",hint:settings.sendUrl ? "Connected. Jobs sync to the BlueForge EICR folder in Google Drive." : "Not set up yet. Until it is, jobs stay on this device and Finish &amp; send opens your email app."})}
       <div class="row"><button class="btn ghost sm" data-act="syncNow">Sync now</button><button class="btn ghost sm" data-act="testSend">Send test email</button></div>
       <div id="sendmsg"></div>
+      ${billingOk() || settings.role !== "Tester" ? scriptUpdateCard() : ""}
       <details class="more"><summary>Set up sync and email (once, on a computer)</summary><div class="small">
         <ol style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
           <li>Tap <b>Copy setup script</b> below and send it to yourself, or open this app on your computer.</li>
@@ -2730,6 +3057,7 @@ function renderSettings(){
       ${field("Multifunction tester (make / serial)","settings.mft")}${field("Insulation resistance tester serial","settings.irSerial",{ph:"e.g. As MFT"})}
       ${field("Continuity / loop / RCD tester serial","settings.loopSerial",{ph:"e.g. As MFT"})}${field("Earth electrode tester serial","settings.elecSerial")}
     </div>
+    ${driveBackupCard()}
     <div class="card"><h2>Backup file</h2>
       <div class="muted small">${IOS ? "On iPhone, always open the app from its home screen icon – data saved there is kept separately from Safari. " : ""}Everything is kept on this device${settings.sendUrl ? " and synced to Google Drive" : ""}. A backup file is an extra copy you can keep anywhere or load onto another device.</div>
       <button class="btn block" data-act="backup">Save backup file</button>
@@ -2751,11 +3079,11 @@ Object.entries(window.BF_FORMS || {}).forEach(([k, f]) => { const L = f.tabs || 
 function renderJob(){
   const job = curJob();
   const t = typeOf(job);
-  if (!TABS[t].some(x => x[0] === view.tab) && !(view.tab === "danger" && t === "EICR") && !(view.tab === "labels" && t !== "PAT") && !(view.tab === "readboard" && view.read) && !(view.tab === "quote" && t === "EICR" && billingOk()) && !(view.tab === "invoice" && billingOk())) view.tab = "job";
+  if (!TABS[t].some(x => x[0] === view.tab) && !(view.tab === "danger" && t === "EICR") && !(view.tab === "labels" && t !== "PAT") && !(view.tab === "readboard" && view.read) && !(view.tab === "prevcert" && view.pc) && !(view.tab === "quote" && t === "EICR" && billingOk()) && !(view.tab === "invoice" && billingOk())) view.tab = "job";
   if (view.tab === "circuits" && curCirc()) return renderCircuit();
   if (view.tab === "pat" && view.patItem && job.pat && job.pat.items.some(x => x.id === view.patItem)) return renderPatItem();
   loadJobPhotos(job);
-  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : FORMS[t] ? formSiteTab : tabWork, form: formDetailsTab, checks: formChecksTab, sched: formSchedTab, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, labels:tabLabels, readboard:tabReadBoard, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
+  const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : FORMS[t] ? formSiteTab : tabWork, form: formDetailsTab, checks: formChecksTab, sched: formSchedTab, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, labels:tabLabels, readboard:tabReadBoard, prevcert:tabPrevCert, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
   return `<header class="top"><button class="iconbtn" data-act="home" aria-label="All jobs">←</button><h1>${esc(jobTitle(job) === "Untitled job" ? "New " + TYPES[t] : jobTitle(job))}<span class="sub">${job.example ? "Example – not saved" : esc(TYPES[t]) + (job.reportNo ? " · " + esc(job.reportNo) : "")}</span></h1></header>
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example report – edits aren't saved</div>` : statusHtml()}
   ${job.handoff && !job.sig && billingOk() && view.tab === "job" ? `<main style="padding-bottom:0"><div class="warnline">Tested by ${esc(job.handoff.by)} and sent for sign-off ${esc(agoText(job.handoff.at))}. Check it through, then sign on the ${t === "EICR" ? "Report" : "Certify"} tab.</div></main>` : ""}
@@ -3078,7 +3406,7 @@ function tabSupply(){
 function tabCircuits(){
   const job = j(), b = curBoard();
   const boardChips = typeOf(job) === "MW" ? "" : job.boards.map((x,i) => `<button class="chip" data-act="board" data-i="${i}" aria-pressed="${i === Math.min(view.board, job.boards.length-1)}">${esc(x.ref || "DB" + (i+1))}</button>`).join("") + (typeOf(job) === "MW" ? "" : `<button class="chip" data-act="addBoard">+ Board</button>`);
-  const list = b.circuits.map(c => { const r = calcCircuit(job, b, c); return `<button class="card-link" data-act="circ" data-id="${c.id}"><span class="cno">${esc(c.no)}</span><div class="grow"><div class="t">${esc(c.desc || "Circuit " + c.no)}</div><div class="d">${esc(devShort(c))}${c.live ? ` · ${esc(c.live)}/${esc(c.cpc || "?")} mm²` : ""}${c.ring === "Y" ? " · ring" : ""}${r.m80 !== null ? ` · limit ${r.m80.toFixed(2)} Ω` : ""}</div></div>${resultPill(r.result)}</button>`; }).join("");
+  const list = b.circuits.map(c => { const r = calcCircuit(job, b, c); return `<button class="card-link" data-act="circ" data-id="${c.id}"><span class="cno">${esc(c.no)}</span><div class="grow"><div class="t">${esc(c.desc || "Circuit " + c.no)}</div><div class="d">${esc(devShort(c))}${c.live ? ` · ${esc(c.live)}/${esc(c.cpc || "?")} mm²` : ""}${c.ring === "Y" ? " · ring" : ""}${r.m80 !== null ? ` · limit ${r.m80.toFixed(2)} Ω` : ""}</div>${prevFlags(c).length ? `<div class="d" style="color:var(--check)">Worse than last time</div>` : ""}</div>${resultPill(r.result)}</button>`; }).join("");
   const counts = b.circuits.reduce((a,c) => { a[calcCircuit(job,b,c).result]++; return a; }, {pass:0,check:0,fail:0,none:0});
   return `
   <div class="boards" role="group" aria-label="Distribution boards">${boardChips}</div>
@@ -3097,6 +3425,7 @@ function tabCircuits(){
     </div></details>
   </div>
   ${readBoardCard(job, b)}
+  ${prevCertCard(job, b)}
   <div class="card"><h2>Circuits <span class="count">${counts.pass} pass · ${counts.check} check · ${counts.fail} fail</span></h2>
     ${list ? `<div style="display:flex;flex-direction:column;gap:8px">${list}</div>` : `<div class="empty">No circuits on this board yet.</div>`}
     <button class="btn block" data-act="addCirc">+ Add circuit</button>
@@ -3114,6 +3443,7 @@ function renderCircuit(){
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example – edits aren't saved</div>` : statusHtml()}
   <main>
     <div class="row"><span class="muted small">Result</span><span data-derived="cpill">${DERIVED.cpill()}</span></div>
+    <div data-derived="prevc">${prevCard(c)}</div>
     <div class="card"><h2>Circuit</h2>
       <div class="grid2">${field("Circuit no.","circ.no")}${field("Points served","circ.pts",{num:true})}</div>
       ${field("Description","circ.desc",{ph:"e.g. Sockets – ring, shop floor"})}
@@ -3175,10 +3505,12 @@ function tabReport(){
     ${field("Observation", `job.obs.${i}.text`, {area:true})}
     <div class="grid2">${field("Location / circuit", `job.obs.${i}.loc`)}${field("Regulation", `job.obs.${i}.reg`)}</div>
     ${chips("Code", `job.obs.${i}.code`, ["C1","C2","C3","FI"], {codes:true})}
+    ${job.example ? "" : aiCodeBlock(o)}
     <div class="field"><span>Photos</span>${thumbs(o.photos, "obs:" + o.id)}</div></div>`).join("");
   return `${banner}
   <div class="codes">${["C1","C2","C3","FI"].map(k => `<div><b>${s.counts[k]}</b><span>${k}</span></div>`).join("")}</div>
   ${dangerCard(job)}
+  ${changesCard(job)}
   ${labelsCard(job)}
   ${quoteCard(job)}
   ${prevObsCard(job)}
@@ -3356,6 +3688,12 @@ document.addEventListener("click", e => {
     case "frowAdd": { const f = formInit(job), rows = f.rows[a.dataset.t] = f.rows[a.dataset.t] || []; rows.push({ ref: String(rows.length + 1) }); view.frowOpen = a.dataset.t + ":" + (rows.length - 1); markDirty(job); rerender(); break; }
     case "frowDup": { const f = formInit(job), rows = f.rows[a.dataset.t], src = rows[+a.dataset.i]; const n = Object.assign({}, src, { ref: String(rows.length + 1), res: "" }); rows.push(n); view.frowOpen = a.dataset.t + ":" + (rows.length - 1); markDirty(job); rerender(); break; }
     case "frowDel": { const f = formInit(job); f.rows[a.dataset.t].splice(+a.dataset.i, 1); view.frowOpen = null; markDirty(job); rerender(); break; }
+    case "pcUse": { const r = view.pc.boards[+a.dataset.b].rows[+a.dataset.r]; r.use = !r.use; rerender(); break; }
+    case "pcApply": applyPrevCert(); break;
+    case "pcCancel": view.pc = null; view.tab = "circuits"; render(); break;
+    case "aiCode": aiCode(a.dataset.id); break;
+    case "aiCodeX": delete aiSug[a.dataset.id]; rerender(); break;
+    case "aiCodeUse": { const o = job.obs.find(x => x.id === a.dataset.id), g = aiSug[a.dataset.id]; if (o && g) { o.code = g.code; if (!o.reg && g.reg) o.reg = g.reg; markDirty(job); rerender(); } break; }
     case "lostOk": view.photoLost = null; rerender(); break;
     case "labCsv": saveLabelCsv(job, curBoard()); break;
     case "exAdd": { const b = curBoard(), k = a.dataset.kind, [t, m] = EXTRA_KINDS[k]; labExtras(job, b).push({ id: uid(), kind: k, text: t, sub: k === "rcd" ? "30mA" : "", pos: 0, mods: m }); markDirty(job); rerender(); break; }
@@ -3374,6 +3712,22 @@ document.addEventListener("click", e => {
     case "ask": view = {screen:"ask"}; render(); break;
     case "train": view = {screen:"train"}; render(); break;
     case "nvq": view = {screen:"nvq"}; render(); break;
+    case "books": view = {screen:"books", ty: view.ty}; render(); break;
+    case "tySet": view.ty = +a.dataset.v; render(); break;
+    case "bkNew": { const bj = booksJob(true), k = a.dataset.k, it = k === "trip" ? { id: uid(), date: today(), ret: "Yes", vehicle: bj.books.vehicle || "", from: "" } : { id: uid(), date: today(), cat: "Materials & stock", paid: "Business account", photos: [] };
+      (k === "trip" ? bj.books.trips : bj.books.exps).push(it); markDirty(bj); view.bk = { k, id: it.id }; render(); break; }
+    case "bkJobTrip": view.bkPick = !view.bkPick; rerender(); break;
+    case "bkUseJob": { const bj = booksJob(true), src = jobs.find(x => x.id === a.dataset.id); if (!src) break; const it = { id: uid(), date: src.inspDate || today(), ret: "Yes", vehicle: bj.books.vehicle || "", from: "", to: String(src.address || "").split("\n")[0], purpose: `${TYPES[typeOf(src)] || ""} ${src.reportNo || ""}`.trim(), jobRef: src.id };
+      bj.books.trips.push(it); markDirty(bj); view.bkPick = false; view.bk = { k: "trip", id: it.id }; render(); break; }
+    case "bkOpen": view.bk = { k: a.dataset.k, id: a.dataset.id }; render(); break;
+    case "bkBack": view.bk = null; view.confirmDel = null; render(); break;
+    case "bkDel": { const bj = booksJob(), key = view.bk.k === "trip" ? "trips" : "exps"; bj.books[key] = bj.books[key].filter(x => x.id !== view.bk.id); markDirty(bj); view.bk = null; view.confirmDel = null; render(); break; }
+    case "bkCsv": { const y = view.ty || taxYear(), f = booksCsv(y), ty = tyLabel(y).replace("/", "-");
+      const files = [["Income", f.inc], ["Expenses", f.exps], ["Mileage", f.trips]].map(([n, t]) => new File([t], `BlueForge ${n} ${ty}.csv`, {type: "text/csv"}));
+      (async () => { if (navigator.canShare && navigator.canShare({ files })) { try { await navigator.share({ files, title: "Year end " + ty }); return; } catch(e){ if (e && e.name === "AbortError") return; } }
+        for (const fl of files) { const u = document.createElement("a"); u.href = URL.createObjectURL(fl); u.download = fl.name; document.body.appendChild(u); u.click(); await new Promise(r => setTimeout(r, 500)); URL.revokeObjectURL(u.href); u.remove(); }
+        toast("Saved 3 files – income, expenses and mileage"); })(); break; }
+    case "bkPrint": { const bj = booksJob(true); (async () => { await loadJobPhotos(bj); printHtml(booksPrintHtml(view.ty || taxYear())); })(); break; }
     case "nvqFw": { const pj = portfolioJob(true); pj.portfolio.fw = a.dataset.v; markDirty(pj); rerender(); break; }
     case "nvqNew": { const pj = portfolioJob(true), it = { id: uid(), date: today(), title: "", units: {}, types: { photo: true }, photos: [] }; pj.portfolio.items.push(it); markDirty(pj); view.pfItem = it.id; render(); break; }
     case "nvqFromJob": view.nvqPick = !view.nvqPick; rerender(); break;
@@ -3484,6 +3838,13 @@ document.addEventListener("click", e => {
       try { await api("test", {to: settings.officeEmail}); syncNow();
         if (m) m.innerHTML = `<div class="muted small">Test email sent to ${esc(settings.officeEmail)}.</div>`; }
       catch(err){ const msg = String(err.message || err); if (m) m.innerHTML = `<div class="errline">Couldn't connect: ${esc(msg)}${/old version/.test(msg) ? "" : ". Check the link is the Web app URL ending in /exec, and that access is set to Anyone"}.</div>`; } })(); break;
+    case "driveBackup": { const m = document.getElementById("drivemsg"); if (m) m.innerHTML = `<div class="muted small"><span class="pulse"></span> Backing up and checking…</div>`;
+      maybeWeeklyBackup(true).then(() => { rerender(); toast("Backed up to Drive and checked"); }, err => { const m2 = document.getElementById("drivemsg"); if (m2) m2.innerHTML = `<div class="errline">${esc(err.message || err)}</div>`; }); break; }
+    case "driveList": api("backupList", {}).then(o => { view.driveList = o.backups || []; rerender(); }, err => { const m = document.getElementById("drivemsg"); if (m) m.innerHTML = `<div class="errline">${esc(err.message || err)}</div>`; }); break;
+    case "driveRestore": { const m = document.getElementById("drivemsg"); if (m) m.innerHTML = `<div class="muted small">Restoring…</div>`;
+      api("backupGet", { id: a.dataset.id }).then(o => { const n = applyBackup(JSON.parse(o.json)); lsWrite(); scheduleSync(1000); view.driveList = null; rerender(); toast(`Restored – ${n} job${n === 1 ? "" : "s"} added or updated`); }, err => { const m2 = document.getElementById("drivemsg"); if (m2) m2.innerHTML = `<div class="errline">${esc(err.message || err)}</div>`; }); break; }
+    case "scriptHelp": view = {screen:"settings"}; render(); setTimeout(() => { const c = document.getElementById("scriptcard"); if (c) c.scrollIntoView({block:"start"}); }, 50); break;
+    case "scriptCheck": { const b2 = a; b2.textContent = "Checking…"; checkScript(true).then(() => { toast(scriptOld() ? "Still the old script – check you chose New version when deploying" : "Script is up to date"); rerender(); }); break; }
     case "copyScript": { const t = scriptText(); const box = document.getElementById("scriptbox"); const m = document.getElementById("sendmsg");
       const shown = () => { box.hidden = false; box.value = t; box.focus(); box.select(); if (m) m.innerHTML = `<div class="muted small">Select all and copy the script below.</div>`; };
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(() => { if (m) m.innerHTML = `<div class="muted small">Script copied.</div>`; }, shown); else shown(); break; }
@@ -3699,6 +4060,14 @@ async function backup(){
   downloadFile(`BlueForge EICR backup ${today()}.json`, data, "application/json");
   const m = document.getElementById("backupmsg"); if (m) m.innerHTML = `<div class="muted small">${IOS ? "Choose Save to Files or Mail to keep the backup." : "Backup saved to Downloads."}</div>`;
 }
+function applyBackup(d){
+      if (!d || d.app !== "blueforge-eicr" || !Array.isArray(d.jobs)) throw new Error("not a backup");
+      let added = 0;
+      d.jobs.forEach(x => { if (!x || !x.id) return; normaliseJob(x); const i = jobs.findIndex(y => y.id === x.id); if (i < 0) { jobs.push(x); added++; } else if ((x.updated||0) > (jobs[i].updated||0)) { jobs[i] = x; added++; } });
+      if (d.photos && typeof d.photos === "object") Object.entries(d.photos).forEach(([id, r]) => { if (r && r.data) { photoPut({id, jobId: r.jobId, data: r.data, created: Date.now(), uploaded: false}); pendingUploads.add(id); } });
+      if (d.settings && !settings.sendUrl && d.settings.sendUrl) { settings.sendUrl = d.settings.sendUrl; if (d.settings.sendKey) settings.sendKey = d.settings.sendKey; }
+  return added;
+}
 document.addEventListener("change", e => {
   if (e.target.id !== "restore" || !e.target.files[0]) return;
   const fr = new FileReader();
@@ -3706,11 +4075,7 @@ document.addEventListener("change", e => {
     const m = document.getElementById("backupmsg");
     try {
       const d = JSON.parse(fr.result);
-      if (!d || d.app !== "blueforge-eicr" || !Array.isArray(d.jobs)) throw new Error("not a backup");
-      let added = 0;
-      d.jobs.forEach(x => { if (!x || !x.id) return; normaliseJob(x); const i = jobs.findIndex(y => y.id === x.id); if (i < 0) { jobs.push(x); added++; } else if ((x.updated||0) > (jobs[i].updated||0)) { jobs[i] = x; added++; } });
-      if (d.photos && typeof d.photos === "object") Object.entries(d.photos).forEach(([id, r]) => { if (r && r.data) { photoPut({id, jobId: r.jobId, data: r.data, created: Date.now(), uploaded: false}); pendingUploads.add(id); } });
-      if (d.settings && !settings.sendUrl && d.settings.sendUrl) { settings.sendUrl = d.settings.sendUrl; if (d.settings.sendKey) settings.sendKey = d.settings.sendKey; }
+      const added = applyBackup(d);
       lsWrite(); scheduleSync(1000);
       if (m) m.innerHTML = `<div class="muted small">Loaded ${added} job${added === 1 ? "" : "s"} (newer copies only).</div>`;
     } catch(err){ if (m) m.innerHTML = `<div class="errline">That file isn't a BlueForge EICR backup.</div>`; }

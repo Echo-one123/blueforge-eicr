@@ -1,5 +1,5 @@
 // BlueForge Certificates – offline cache. Bump CACHE on every release so devices pick up the new version.
-const CACHE = "bf-eicr-v27";
+const CACHE = "bf-eicr-v28";
 const SHELL = ["./", "./index.html", "./app.js", "./bf-data.js", "./bf-train.js", "./bf-forms.js", "./bf-nvq.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 const OPTIONAL = ["./logo-blueforge.png", "./logo-inaec.png", "./logo-mark.png"];   // cached if present; a missing logo never blocks the update
 self.addEventListener("install", e => {
