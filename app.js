@@ -1345,6 +1345,51 @@ function billingCard(){
     <button class="btn sm" data-act="billingOn" ${settings.sendUrl ? "" : "disabled"}>Unlock owner access</button><div id="billmsg"></div>`}</div>`;
 }
 
+/* ---------------- AI regs assistant */
+function mdLite(t){
+  // escape first, then a few safe markdown bits: **bold**, lists, line breaks
+  const lines = esc(String(t || "")).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").split(/\n/);
+  let out = "", list = null;
+  const close = () => { if (list) { out += `</${list}>`; list = null; } };
+  for (const l of lines) {
+    const ul = l.match(/^\s*[-•*]\s+(.*)/), ol = l.match(/^\s*\d+[.)]\s+(.*)/);
+    if (ul) { if (list !== "ul") { close(); out += "<ul>"; list = "ul"; } out += `<li>${ul[1]}</li>`; }
+    else if (ol) { if (list !== "ol") { close(); out += "<ol>"; list = "ol"; } out += `<li>${ol[1]}</li>`; }
+    else { close(); out += l.trim() ? `<p>${l.replace(/^#+\s*/, "")}</p>` : ""; }
+  }
+  close(); return out;
+}
+const askLog = () => (settings.askLog = Array.isArray(settings.askLog) ? settings.askLog : []);
+let askBusy = false;
+function renderAsk(){
+  const log = askLog();
+  return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Ask the regs<span class="sub">AI assistant · BS 7671:2018+A4</span></h1></header>
+  <main>
+    <div class="card"><div class="muted small">Ask anything – regs, test limits, coding, calcs, Part P. Answers quote regulation numbers; always check anything critical against your own copy of BS 7671 / GN3. Needs signal.</div>
+      <label class="field" for="askq"><span>Your question</span><textarea id="askq" data-bind="settings.askDraft" placeholder="e.g. Does a 20 A radial to an outside socket need an RCD and what code if it hasn't?">${esc(settings.askDraft || "")}</textarea></label>
+      ${SR ? `<button type="button" class="btn ghost sm dict" data-dictate="settings.askDraft">🎤 Dictate</button>` : ""}
+      <div class="row"><button class="btn" data-act="askGo" ${askBusy ? "disabled" : ""}>${askBusy ? "Thinking…" : "Ask"}</button>${log.length ? `<label class="small row" style="gap:6px"><input type="checkbox" id="askfollow" ${view.askFollow ? "checked" : ""}> Follow-up to last answer</label>` : ""}</div>
+      <div id="askmsg"></div></div>
+    ${log.slice().reverse().map((h, i) => `<div class="card ask"><div class="q">${esc(h.q)}</div><div class="a">${mdLite(h.a)}</div><div class="row small muted"><span>${esc(agoText(h.at))}${h.by ? " · " + esc(h.by) : ""}</span><span class="spacer"></span><button class="btn ghost sm" data-act="askCopy" data-i="${log.length - 1 - i}">Copy</button><button class="btn ghost sm" data-act="askRemove" data-i="${log.length - 1 - i}">Remove</button></div></div>`).join("")}
+    ${log.length ? `<button class="btn ghost sm" data-act="askClear">Clear all</button>` : `<div class="card"><h2>Try</h2>${["What's the max Zs for a B32 RCBO and how is the 80% figure worked out?","Is a missing main bonding to gas C2 or C3?","Minimum IR for a 230 V circuit and what test voltage?","Does replacing a consumer unit need notifying in Wales?"].map(q => `<button class="card-link" data-act="askTry" data-q="${esc(q)}"><div class="grow"><div class="t" style="font-weight:500">${esc(q)}</div></div></button>`).join("")}</div>`}
+  </main>`;
+}
+async function askGo(){
+  const box = document.getElementById("askq"), q = (box && box.value || "").trim(), m = document.getElementById("askmsg");
+  if (!q) return;
+  if (!settings.sendUrl) { if (m) m.innerHTML = `<div class="errline">Set up sync first (⚙ Settings) – questions go through your Google script.</div>`; return; }
+  if (navigator.onLine === false) { if (m) m.innerHTML = `<div class="warnline">No signal – the assistant needs internet. Your question is kept here; tap Ask again when you have signal.</div>`; settings.askDraft = q; return; }
+  const follow = (document.getElementById("askfollow") || {}).checked;
+  settings.askDraft = q; view.askFollow = follow; askBusy = true; rerender();
+  try {
+    const o = await api("ask", { question: q, history: follow ? askLog().slice(-3) : [] });
+    askLog().push({ q, a: String(o.answer || "").trim(), at: Date.now(), by: settings.userName || "" });
+    while (askLog().length > 40) askLog().shift();
+    settings.askDraft = ""; lsWrite();
+  } catch(err){ askBusy = false; rerender(); const m2 = document.getElementById("askmsg"); if (m2) m2.innerHTML = `<div class="errline">${esc(/Unknown action/i.test(err.message) ? "Your Google script needs updating – paste in the new script and redeploy." : err.message)}</div>`; return; }
+  askBusy = false; rerender();
+}
+
 /* ---------------- read a board from a photo (AI via the Google script) */
 function readBoardCard(job, b){
   if (job.example || typeOf(job) === "PAT" || typeOf(job) === "MW") return "";
@@ -1804,6 +1849,11 @@ var OFFICE = "${settings.officeEmail}";
 var FOLDER_NAME = "BlueForge EICR";   // created in your Google Drive on first use. To use a shared drive folder, put its ID in FOLDER_ID below.
 var FOLDER_ID = "";
 var AI_MODEL = "claude-sonnet-5-5";   // model used to read board photos – change here if Anthropic retires it
+var ASK_SYSTEM = "You are a senior UK electrical inspector helping an experienced electrician (NVQ, 2391) working in North Wales. " +
+  "Answer questions about BS 7671:2018+A4:2026 (18th Edition, IET Wiring Regulations), the On-Site Guide, Guidance Note 3, Building Regulations Part P (Wales), EICR coding (Electrical Safety First Best Practice Guide 4), testing and inspection, and practical installation. " +
+  "Be direct and practical: lead with the answer in one or two sentences, then the key points. Quote regulation, table or appendix numbers where they apply (e.g. Reg 411.3.3, Table 41.3). " +
+  "Show calculations step by step with the formula. If a specific table value or clause matters and you are not certain of it, say so and tell them to check their copy of BS 7671 or GN3 – never invent numbers. " +
+  "Mention safety-critical points (safe isolation, when something is C1/C2). Keep answers under about 250 words unless a calculation needs more. Use plain text with short lists; no tables.";
 var BOARD_PROMPT = "This is a photo of an electrical consumer unit or distribution board in the UK with the cover off (or with the device fronts visible). " +
   "List every device on the DIN rail(s) strictly from LEFT to RIGHT as seen in the photo (if there are several rows, do the top row first). Include blank/spare ways. " +
   "For each device give: kind (one of: ms = main switch/isolator, rcd = RCCB/RCD, mcb, rcbo, spd = surge protector, fuse, afdd, blank, other), " +
@@ -1841,6 +1891,17 @@ function doPost(e) {
       if (nk2 && !/^sk-ant-/.test(nk2)) return reply({ok: false, error: "That doesn't look like an Anthropic API key (it should start sk-ant-)"});
       if (nk2) P.setProperty("aiKey", nk2); else P.deleteProperty("aiKey");
       return reply({ok: true, ai: !!nk2});
+    }
+    if (d.action === "ask") {
+      var ak2 = P.getProperty("aiKey");
+      if (!ak2) return reply({ok: false, error: "The AI isn't set up yet – the owner adds the AI key in Settings > Owner access"});
+      var msgs = (d.history || []).slice(-6).reduce(function (a, h) { if (h && h.q && h.a) { a.push({role: "user", content: String(h.q).slice(0, 2000)}); a.push({role: "assistant", content: String(h.a).slice(0, 4000)}); } return a; }, []);
+      msgs.push({role: "user", content: String(d.question || "").slice(0, 3000)});
+      var r2 = UrlFetchApp.fetch("https://api.anthropic.com/v1/messages", {method: "post", contentType: "application/json",
+        headers: {"x-api-key": ak2, "anthropic-version": "2023-06-01"}, payload: JSON.stringify({model: AI_MODEL, max_tokens: d.maxTokens || 1500, system: d.system || ASK_SYSTEM, messages: msgs}), muteHttpExceptions: true});
+      var c2 = r2.getResponseCode(), t2 = r2.getContentText();
+      if (c2 !== 200) { var e2 = t2.slice(0, 200); try { e2 = JSON.parse(t2).error.message; } catch (x) {} return reply({ok: false, error: "AI failed (" + c2 + "): " + e2}); }
+      return reply({ok: true, answer: (JSON.parse(t2).content || []).filter(function (c) { return c.type === "text"; }).map(function (c) { return c.text; }).join("")});
     }
     if (d.action === "readBoard") {
       var ak = P.getProperty("aiKey");
@@ -2053,6 +2114,7 @@ function render(){
   else if (view.screen === "book") html = renderBook();
   else if (view.screen === "codes") html = renderCodes();
   else if (view.screen === "due") html = renderDue();
+  else if (view.screen === "ask") html = renderAsk();
   else if (view.screen === "money") html = billingOk() ? renderMoney() : renderHome();
   else if (view.screen === "job") { if (curJob() && !curJob().deleted) html = renderJob(); else { view = {screen:"home", tab:"job", board:0, circ:null}; html = renderHome(); } }
   app.innerHTML = html;
@@ -2103,6 +2165,7 @@ function renderHome(){
     <div class="tiles">
       <button class="tile" data-act="book"><b>Handbook</b><span>Tables, test methods, calculators</span></button>
       <button class="tile" data-act="codes"><b>Coding guide</b><span>Search C1 · C2 · C3 · FI</span></button>
+      <button class="tile" data-act="ask"><b>Ask the regs</b><span>AI answers with reg numbers</span></button>
       ${billingOk() ? "" : "<!--"}<button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>${billingOk() ? "" : "-->"}
       <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} re-inspection${dueList().length === 1 ? "" : "s"} to chase</span></button>
     </div>
@@ -2741,6 +2804,12 @@ document.addEventListener("click", e => {
     case "printDanger": printHtml(dangerHtml(job), "danger"); break;
     case "clearSigPath": { const [rt, ...rs] = a.dataset.path.split("."); setPath(roots()[rt], rs.join("."), ""); markDirty(job); rerender(); break; }
     case "due": view = {screen:"due"}; render(); break;
+    case "ask": view = {screen:"ask"}; render(); break;
+    case "askGo": askGo(); break;
+    case "askTry": { const b2 = document.getElementById("askq"); if (b2) { b2.value = a.dataset.q; settings.askDraft = a.dataset.q; } askGo(); break; }
+    case "askCopy": { const h = askLog()[+a.dataset.i]; if (h) { const t = h.q + "\n\n" + h.a; (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Copied"), () => toast("Couldn't copy on this device")); } break; }
+    case "askRemove": askLog().splice(+a.dataset.i, 1); lsWrite(); rerender(); break;
+    case "askClear": settings.askLog = []; lsWrite(); rerender(); break;
     case "contacted": { const x = jobs.find(y => y.id === a.dataset.id); if (x) { x.contactedAt = Date.now(); x.updated = Date.now(); lsWrite(); scheduleSync(3000); } rerender(); break; }
     case "reinspect": { const src = jobs.find(y => y.id === a.dataset.id); if (!src) break; const nj = newJobFrom(src, "EICR"); jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); break; }
     case "addPat": { job.pat.items.push(newPatItem(job.pat.items.length + 1)); view.patItem = job.pat.items[job.pat.items.length - 1].id; markDirty(job); render(); break; }
