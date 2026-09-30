@@ -453,7 +453,7 @@ const dirty = new Set();
 let saveState = "saved";
 const LS = "bf-eicr-v1", IDB_NAME = "bf-eicr", IDB_STORE = "kv";
 let idb = null, writeChain = Promise.resolve(), persistTimer = null;
-const liveJobs = () => jobs.filter(x => !x.deleted);
+const liveJobs = () => jobs.filter(x => !x.deleted && x.type !== "NVQ");
 function idbOpen(){ return new Promise(res => { try { const r = indexedDB.open(IDB_NAME, 2); r.onupgradeneeded = () => { const d = r.result; if (!d.objectStoreNames.contains(IDB_STORE)) d.createObjectStore(IDB_STORE); if (!d.objectStoreNames.contains("photos")) d.createObjectStore("photos"); }; r.onsuccess = () => res(r.result); r.onerror = () => res(null); r.onblocked = () => res(null); } catch(e){ res(null); } }); }
 function idbGet(k){ return new Promise(res => { if (!idb) return res(undefined); try { const q = idb.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); } catch(e){ res(undefined); } }); }
 function idbSet(k, v){ return new Promise(res => { if (!idb) return res(false); try { const tx = idb.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(v, k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); tx.onabort = () => res(false); } catch(e){ res(false); } }); }
@@ -530,8 +530,9 @@ async function init(){
     } catch(e){}
   }
   const lost = takePhotoPending();
-  if (lost && jobs.some(x => x.id === lost.jobId && !x.deleted)) { view = {screen:"job", jobId:lost.jobId, tab:"photos", board:0, circ:null, photoLost: lost.target}; }
-  else try { const r = JSON.parse(sessionStorage.getItem("bf-return") || "null"); sessionStorage.removeItem("bf-return"); if (r && jobs.some(x => x.id === r.jobId && !x.deleted)) view = {screen:"job", jobId:r.jobId, tab:r.tab, board:0, circ:null}; } catch(e){}
+  if (lost && String(lost.target || "").startsWith("pf:") && jobs.some(x => x.id === lost.jobId && !x.deleted)) { view = {screen:"nvq", jobId:lost.jobId, pfItem: lost.target.slice(3)}; setTimeout(() => toast("Your phone closed the app while the camera was open – use Gallery to add that photo"), 800); }
+  else if (lost && jobs.some(x => x.id === lost.jobId && !x.deleted && x.type !== "NVQ")) { view = {screen:"job", jobId:lost.jobId, tab:"photos", board:0, circ:null, photoLost: lost.target}; }
+  else try { const r = JSON.parse(sessionStorage.getItem("bf-return") || "null"); sessionStorage.removeItem("bf-return"); if (r && r.screen === "nvq") view = {screen:"nvq", jobId:r.jobId, pfItem:r.pfItem}; else if (r && jobs.some(x => x.id === r.jobId && !x.deleted && x.type !== "NVQ")) view = {screen:"job", jobId:r.jobId, tab:r.tab, board:0, circ:null}; } catch(e){}
   render(); hideSplash();
   if (lockOn()) showLock();
   window.addEventListener("online", () => { updateStatus(); syncNow(); });
@@ -627,6 +628,7 @@ function allPhotoIds(job){
   Object.values(p.slots).forEach(a => ids.push(...(a || [])));
   ids.push(...(p.other || []));
   (job.obs || []).forEach(o => ids.push(...(o.photos || [])));
+  if (job.portfolio) (job.portfolio.items || []).forEach(it => ids.push(...(it.photos || [])));
   return ids;
 }
 function missingPhotos(job){
@@ -687,6 +689,7 @@ async function addPhotos(target, files){
       const rec = { id, jobId: job.id, data: c.data, w: c.w, h: c.h, created: Date.now(), uploaded: false };
       await photoPut(rec); photoCache.set(id, c.data); pendingUploads.add(id); photoUploadsPending = pendingUploads.size;
       if (target.startsWith("obs:")) { const o = job.obs.find(x => x.id === target.slice(4)); if (o) { o.photos = o.photos || []; o.photos.push(id); } }
+      else if (target.startsWith("pf:")) { const it = job.portfolio && job.portfolio.items.find(x => x.id === target.slice(3)); if (it) { it.photos = it.photos || []; it.photos.push(id); } }
       else if (target === "other") p.other.push(id);
       else { (p.slots[target] = p.slots[target] || []).push(id); delete p.na[target]; }
       added++;
@@ -702,6 +705,7 @@ function removePhoto(id){
   Object.keys(p.slots).forEach(k => p.slots[k] = (p.slots[k] || []).filter(x => x !== id));
   p.other = p.other.filter(x => x !== id);
   job.obs.forEach(o => o.photos = (o.photos || []).filter(x => x !== id));
+  if (job.portfolio) job.portfolio.items.forEach(it => it.photos = (it.photos || []).filter(x => x !== id));
   (job.photoDeletes = job.photoDeletes || []).push(id);
   photoDel(id); photoCache.delete(id);
   markDirty(job);
@@ -746,6 +750,8 @@ document.addEventListener("toggle", e => { const d = e.target; if (d && d.matche
 document.addEventListener("change", e => {
   const fb = e.target.closest && e.target.closest('input[data-bind^="job.form."]');
   if (fb && view.screen === "job") updateFormHint(fb);
+  const nu = e.target.closest && e.target.closest("[data-nvqunit]");
+  if (nu) { const pj = portfolioJob(), it = pj && pj.portfolio.items.find(x => x.id === view.pfItem); if (it) { it.units = it.units || {}; it.units[nu.dataset.nvqunit] = nu.checked; markDirty(pj); } return; }
   const am = e.target.closest && e.target.closest("[data-am2e]");
   if (am) { tr().am2e[am.dataset.am2e] = am.checked; flush(); const h = am.closest(".card") && am.closest(".card").querySelector(".count"); if (h) { const box = am.closest(".card"); h.textContent = box.querySelectorAll("[data-am2e]:checked").length + "/" + box.querySelectorAll("[data-am2e]").length; } return; }
   const rb = e.target.closest && e.target.closest("[data-readboard]");
@@ -789,7 +795,7 @@ async function syncPhotos(){
   for (const job of jobs){ if (job.photoDeletes && job.photoDeletes.length) deletes.push(...job.photoDeletes.map(id => ({job, id}))); }
   for (const d of deletes.slice(0, 20)){ try { await api("delPhoto", { id: d.id }); } catch(e){} d.job.photoDeletes = d.job.photoDeletes.filter(x => x !== d.id); }
   const want = [];
-  liveJobs().forEach(job => allPhotoIds(job).forEach(id => { if (!local.has(id)) want.push({id, jobId: job.id}); }));
+  jobs.filter(x => !x.deleted).forEach(job => allPhotoIds(job).forEach(id => { if (!local.has(id)) want.push({id, jobId: job.id}); }));
   let got = 0;
   for (const w of want){
     if (budget-- <= 0) break;
@@ -1048,7 +1054,7 @@ function tabLabels(){
 }
 function printHtml(html, returnTab){
   if (IOS) {
-    try { if (persistTimer) { clearTimeout(persistTimer); writeNow(); } sessionStorage.setItem("bf-return", JSON.stringify({jobId: view.jobId, tab: returnTab || view.tab})); } catch(e){}
+    try { if (persistTimer) { clearTimeout(persistTimer); writeNow(); } sessionStorage.setItem("bf-return", JSON.stringify({jobId: view.jobId, tab: returnTab || view.tab, screen: view.screen, pfItem: view.pfItem || null})); } catch(e){}
     const bar = `<div id="bf-bar" style="position:sticky;top:0;z-index:9;display:flex;gap:8px;padding:10px 12px;padding-top:calc(10px + env(safe-area-inset-top,0px));background:#1B365D"><button onclick="location.reload()" style="flex:1;min-height:44px;border-radius:10px;border:1px solid #fff;background:transparent;color:#fff;font:600 16px Arial">‹ Back to app</button><button onclick="window.print()" style="flex:1;min-height:44px;border-radius:10px;border:0;background:#2E75B6;color:#fff;font:600 16px Arial">Print / PDF</button></div><style>@media print{#bf-bar{display:none!important}}</style>`;
     document.open(); document.write(html.replace(/<body>/, "<body>" + bar)); document.close(); window.scrollTo(0, 0); return;
   }
@@ -1493,6 +1499,125 @@ ${kv([["Covers", esc(f.roles.join(", ") || "–")], ...(F.intervalMonths ? [["Ne
 ${job.handover && job.handover.name ? `<h2>Received by</h2>${kv([["Name", esc(job.handover.name)], ["Date", esc(ukDate(job.handover.date))], ["Signature", job.handover.sig ? `<img src="${job.handover.sig}" alt="" style="max-height:60px">` : ""]])}` : ""}
 ${photosSectionHtml(job, false)}
 <footer>${esc(co.company || "BlueForge Engineering")} – ${esc(F.name)} ${esc(job.reportNo || "")} – ${esc(job.address || "")}</footer></body></html>`;
+}
+
+/* ---------------- NVQ / experienced-worker portfolio (stored as one hidden, synced job) */
+const NVQ = window.BF_NVQ || { frameworks: [], evidenceTypes: [], rules: [] };
+function portfolioJob(create){
+  const who = settings.userName || settings.inspector || "me";
+  let pj = jobs.find(x => x.type === "NVQ" && !x.deleted && x.portfolio && (x.portfolio.who || who) === who);
+  if (!pj && create) { pj = { id: uid(), type: "NVQ", created: Date.now(), updated: Date.now(), client: {}, boards: [], obs: [], insp: {}, photos: { slots: {}, na: {}, other: [] }, portfolio: { who, fw: (NVQ.frameworks.find(f => f.likely) || NVQ.frameworks[0] || {}).id || "", name: who === "me" ? "" : who, items: [] } }; jobs.push(pj); markDirty(pj); }
+  if (pj) { pj.portfolio = pj.portfolio || { items: [] }; pj.portfolio.items = pj.portfolio.items || []; }
+  return pj;
+}
+const nvqFw = pf => NVQ.frameworks.find(f => f.id === pf.fw) || NVQ.frameworks[0];
+const fwName = fw => String(fw ? fw.name : "").replace(/\s*[-–]\s*named on .*$/i, "");
+function nvqCoverage(pf){ const cov = {}; pf.items.forEach(it => Object.keys(it.units || {}).forEach(k => { if (it.units[k]) cov[k] = (cov[k] || 0) + 1; })); return cov; }
+function renderNvq(){
+  const pj = portfolioJob(true), pf = pj.portfolio, fw = nvqFw(pf), cov = nvqCoverage(pf);
+  view.jobId = pj.id; loadJobPhotos(pj);
+  if (view.pfItem) return renderNvqItem(pj);
+  const perf = fw ? fw.units.filter(u => u.kind === "performance") : [];
+  const outs = perf.flatMap(u => u.outcomes || []), done = outs.filter(o => (cov[o.id] || 0) >= 2).length, some = outs.filter(o => cov[o.id] === 1).length;
+  return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>NVQ portfolio<span class="sub">${esc(fw ? fw.id.toUpperCase() : "")} · ${pf.items.length} evidence item${pf.items.length === 1 ? "" : "s"}</span></h1></header>
+  <main>
+    <div class="card"><h2>Your qualification</h2>
+      <div class="chips">${NVQ.frameworks.map(f => `<button class="chip small" data-act="nvqFw" data-v="${esc(f.id)}" aria-pressed="${pf.fw === f.id}">${esc(f.id === "eal-ewq" ? "EAL experienced worker" : f.id === "2346" ? "C&G 2346-03" : f.id === "2357" ? "C&G 2357 NVQ" : f.id)}${f.likely ? " (likely yours)" : ""}</button>`).join("")}</div>
+      <div class="small">${esc(fw ? fw.name : "")}</div>
+      <details class="more"><summary>Check with Access Training</summary><div class="small">${mdLite(NVQ.note || "")}</div></details></div>
+    <div class="card"><div class="tstats"><div><b>${done}</b><span>outcomes with 2+ pieces</span></div><div><b>${some}</b><span>with 1</span></div><div><b>${outs.length - done - some}</b><span>still to cover</span></div></div>
+      <div class="row"><button class="btn" data-act="nvqNew">+ New evidence</button><button class="btn ghost" data-act="nvqFromJob">From a job in the app</button></div>
+      ${view.nvqPick ? `<div class="presets">${liveJobs().filter(x => !x.example).sort((a, b) => String(b.inspDate).localeCompare(String(a.inspDate))).slice(0, 25).map(x => `<button class="card-link" data-act="nvqUseJob" data-id="${esc(x.id)}"><div class="grow"><div class="t">${esc(TYPES[typeOf(x)] || x.type)} · ${esc(ukDate(x.inspDate))}</div><div class="d">${esc(jobTitle(x))}${x.reportNo ? " · " + esc(x.reportNo) : ""}</div></div></button>`).join("") || `<div class="muted small">No jobs yet.</div>`}</div>` : ""}
+    </div>
+    ${pf.items.length ? `<div class="card"><h2>Evidence</h2>${pf.items.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).map(it => { const n = Object.values(it.units || {}).filter(Boolean).length;
+      return `<button class="card-link" data-act="nvqOpen" data-id="${esc(it.id)}"><div class="grow"><div class="t">${esc(it.title || "Untitled evidence")}</div><div class="d">${esc(ukDate(it.date))}${it.where ? " · " + esc(it.where) : ""} · ${(it.photos || []).length} photo${(it.photos || []).length === 1 ? "" : "s"}${it.wit && it.wit.sig ? " · witness signed" : ""}</div></div>${n ? pill("pass", n + " outcome" + (n === 1 ? "" : "s")) : pill("check","not mapped")}</button>`; }).join("")}</div>` : ""}
+    ${fw ? `<div class="card"><h2>Coverage</h2><div class="muted small">Aim for at least two pieces of evidence for every outcome – most units have to be shown on more than one occasion.</div>
+      ${fw.units.map(u => `<details class="more"${u.kind === "performance" ? "" : ""}><summary><b>${esc(u.no)}</b> ${esc(u.title)} ${u.kind === "performance" ? (() => { const o = u.outcomes || [], d = o.filter(x => (cov[x.id] || 0) >= 2).length; return pill(d === o.length && o.length ? "pass" : d || o.some(x => cov[x.id]) ? "check" : "fail", d + "/" + o.length); })() : pill("none", u.kind === "knowledge" ? "exam" : esc(u.kind || ""))}</summary><div>
+        ${u.note ? `<div class="warnline small">${esc(u.note)}</div>` : ""}
+        ${(u.outcomes || []).map(o => `<div class="nvqout"><div class="row"><span class="small" style="flex:1"><b>${esc(o.id)}</b> ${esc(o.text)}</span>${u.kind === "performance" ? pill((cov[o.id] || 0) >= 2 ? "pass" : cov[o.id] ? "check" : "fail", String(cov[o.id] || 0)) : ""}</div>
+          ${(o.evidence || []).length ? `<div class="small muted">Good evidence: ${esc(o.evidence.join("; "))}</div>` : ""}</div>`).join("")}</div></details>`).join("")}</div>` : ""}
+    <div class="card"><h2>Declaration &amp; export</h2><div class="small">I confirm that the evidence in this portfolio is my own work, carried out by me, and that witness statements were given by the people named.</div>
+      ${field("Your name","job.portfolio.name")}${sigPad("Your signature","job.portfolio.sig","job.portfolio.sigDate")}
+      <button class="btn block" data-act="nvqExport">Print / save the whole portfolio as PDF</button>
+      <div class="muted small">Each evidence item can also be printed on its own – easier for uploading one by one to your e-portfolio.</div></div>
+    <div class="card"><h2>Portfolio tips</h2><ul class="small">${(NVQ.rules || []).map(r => `<li>${esc(r)}</li>`).join("")}</ul>
+      <details class="more"><summary>Evidence types that count</summary><div>${(NVQ.evidenceTypes || []).map(e => `<div class="small"><b>${esc(e.name)}</b> – ${esc(e.how)}</div>`).join("")}</div></details>
+      <div class="small muted">Sources: ${(NVQ.sources || []).slice(0, 6).map(s => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join(" · ")}</div></div>
+  </main>`;
+}
+function renderNvqItem(pj){
+  const pf = pj.portfolio, i = pf.items.findIndex(x => x.id === view.pfItem), it = pf.items[i], fw = nvqFw(pf);
+  if (!it) { view.pfItem = null; return renderNvq(); }
+  const b = "job.portfolio.items." + i + ".";
+  it.units = it.units || {}; it.types = it.types || {};
+  return `<header class="top"><button class="iconbtn" data-act="nvqBack" aria-label="Back">←</button><h1>${esc(it.title || "New evidence")}<span class="sub">Evidence · ${esc(ukDate(it.date))}</span></h1></header>
+  <main>
+    <div class="card"><h2>The job</h2>${field("Title","" + b + "title",{ph:"e.g. Three-phase DB change at commercial unit"})}
+      <div class="grid2">${field("Date","" + b + "date",{type:"date"})}${field("Site / location","" + b + "where",{ph:"Town, type of premises"})}</div>
+      ${chips("Setting", b + "setting", ["Domestic","Commercial","Industrial"], {small:true})}
+      ${it.jobRef && jobs.some(x => x.id === it.jobRef && !x.deleted) ? `<div class="row small"><span class="muted">Linked to</span><button class="btn ghost sm" data-act="open" data-id="${esc(it.jobRef)}">${esc(TYPES[typeOf(jobs.find(x => x.id === it.jobRef))] || "job")} ${esc(jobs.find(x => x.id === it.jobRef).reportNo || "")}</button><span class="muted">– its certificate prints with this evidence</span></div>` : ""}</div>
+    <div class="card"><h2>What I did</h2><div class="muted small">A factual account in your own words: what the job was, what YOU did step by step, the decisions you made and why, the tests you did and results, and how you worked safely.</div>
+      ${field("Factual account", b + "account", {area:true, ph:"On arrival I… I carried out safe isolation by… I then…"})}
+      <button class="btn ghost sm" data-act="nvqAi">Tidy up my account (AI)</button><div id="nvqaimsg"></div></div>
+    <div class="card"><h2>Photos</h2><div class="muted small">Before, during and after – show your work, your test instrument readings, labels and the finished job. No customers' faces or personal details.</div>${thumbs(it.photos || [], "pf:" + it.id)}</div>
+    <div class="card"><h2>Type of evidence</h2><div class="chips">${(NVQ.evidenceTypes || []).map(e => `<button class="chip small" data-act="nvqType" data-v="${esc(e.id)}" aria-pressed="${!!it.types[e.id]}">${esc(e.name)}</button>`).join("")}</div></div>
+    <div class="card"><h2>What it covers</h2><div class="muted small">Tick every outcome this job shows. Only tick what the account and photos actually prove.</div>
+      ${fw ? fw.units.filter(u => u.kind === "performance").map(u => { const n = (u.outcomes || []).filter(o => it.units[o.id]).length; return `<details class="more"${n ? " open" : ""}><summary><b>${esc(u.no)}</b> ${esc(u.title)} ${n ? pill("pass", String(n)) : ""}</summary><div>
+        ${(u.outcomes || []).map(o => `<label class="amitem"><input type="checkbox" data-nvqunit="${esc(o.id)}" ${it.units[o.id] ? "checked" : ""}><span><b>${esc(o.id)}</b> ${esc(o.text)}</span></label>`).join("")}</div></details>`; }).join("") : ""}</div>
+    <div class="card"><h2>Witness testimony</h2><div class="muted small">From a supervisor, client or another qualified electrician who saw you do the work. They sign on your phone.</div>
+      ${chips("Include a witness testimony", b + "hasWit", ["Yes","No"], {small:true})}
+      ${it.hasWit === "Yes" ? `<div class="grid2">${field("Witness name", b + "wit.name")}${field("Job title / role", b + "wit.role")}</div>
+        <div class="grid2">${field("Company", b + "wit.company")}${field("Relationship to you", b + "wit.rel", {ph:"e.g. site supervisor, client"})}</div>
+        <div class="grid2">${field("Phone or email", b + "wit.contact")}${field("ECS / JIB card no. (if held)", b + "wit.card")}</div>
+        ${field("Their statement", b + "wit.text", {area:true, ph:"I confirm that I saw Adam … on [date] at [site]. He …"})}
+        <button class="btn ghost sm" data-act="nvqWitDraft">Draft the statement from my account</button><div class="muted small">The witness must read it and change anything they didn't see before signing – it has to be their statement.</div>
+        ${sigPad("Witness signature", b + "wit.sig", b + "wit.date")}${field("Date", b + "wit.date", {type:"date"})}` : ""}</div>
+    <div class="row"><button class="btn" data-act="nvqPrintItem">Print this evidence</button><span class="spacer"></span>${view.confirmDel === "pf" ? `<button class="btn danger sm" data-act="nvqDel">Delete it</button><button class="btn ghost sm" data-act="cancelDel">Keep</button>` : `<button class="btn ghost sm" data-act="askDel" data-what="pf">Delete</button>`}</div>
+  </main>`;
+}
+function nvqItemHtml(pj, it, fw){
+  const ref = it.jobRef ? jobs.find(x => x.id === it.jobRef && !x.deleted) : null;
+  const outs = fw ? fw.units.flatMap(u => (u.outcomes || []).filter(o => (it.units || {})[o.id]).map(o => `<li><b>${esc(o.id)}</b> ${esc(o.text)}</li>`)) : [];
+  const types = (NVQ.evidenceTypes || []).filter(e => (it.types || {})[e.id]).map(e => e.name);
+  const w = it.hasWit === "Yes" ? (it.wit || {}) : null;
+  return `<section class="pfitem"><h2>${esc(it.title || "Evidence")}</h2>
+  <table class="kv"><tbody><tr><th>Date</th><td>${esc(ukDate(it.date))}</td><th>Site</th><td>${esc(it.where || "")}${it.setting ? " (" + esc(it.setting) + ")" : ""}</td></tr>
+  <tr><th>Evidence type</th><td colspan="3">${esc(types.join(", ") || "–")}</td></tr>${ref ? `<tr><th>Certificate</th><td colspan="3">${esc(TYPE_LONG[typeOf(ref)] || ref.type)} ${esc(ref.reportNo || "")} – ${esc(jobTitle(ref))}</td></tr>` : ""}</tbody></table>
+  <h3>Factual account</h3><p>${esc(it.account || "").replace(/\n/g, "<br>")}</p>
+  ${outs.length ? `<h3>Outcomes covered</h3><ul>${outs.join("")}</ul>` : ""}
+  ${(it.photos || []).length ? `<h3>Photos</h3><div class="pfphotos">${it.photos.map(id => photoCache.get(id) ? `<img src="${photoCache.get(id)}" alt="">` : "").join("")}</div>` : ""}
+  ${w ? `<h3>Witness testimony</h3><table class="kv"><tbody><tr><th>Name</th><td>${esc(w.name || "")}</td><th>Role</th><td>${esc(w.role || "")}</td></tr><tr><th>Company</th><td>${esc(w.company || "")}</td><th>Relationship</th><td>${esc(w.rel || "")}</td></tr><tr><th>Contact</th><td>${esc(w.contact || "")}</td><th>Card no.</th><td>${esc(w.card || "")}</td></tr></tbody></table>
+    <p>${esc(w.text || "").replace(/\n/g, "<br>")}</p><table class="kv"><tbody><tr><th>Signature</th><td>${w.sig ? `<img src="${w.sig}" alt="" style="max-height:60px">` : ""}</td><th>Date</th><td>${esc(ukDate(w.date))}</td></tr></tbody></table>` : ""}
+  </section>`;
+}
+function nvqPackHtml(pj, items){
+  const pf = pj.portfolio, fw = nvqFw(pf), cov = nvqCoverage({ items });
+  const matrix = fw ? `<h2>Coverage</h2><table class="sched"><thead><tr><th>Outcome</th><th>Evidence</th></tr></thead><tbody>${fw.units.filter(u => u.kind === "performance").flatMap(u => (u.outcomes || []).map(o => `<tr class="${(cov[o.id] || 0) ? "" : "fail"}"><td><b>${esc(o.id)}</b> ${esc(o.text)}</td><td>${items.map((it, k) => (it.units || {})[o.id] ? "E" + (k + 1) : "").filter(Boolean).join(", ")}</td></tr>`)).join("")}</tbody></table>` : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Portfolio – ${esc(pf.name || "")}</title><style>${REPORT_CSS}
+.pfitem{page-break-before:always}.pfitem h3{font-size:14px;margin:12px 0 4px;color:#1B365D}.pfitem p{font-size:12.5px;line-height:1.5}.pfphotos{display:flex;flex-wrap:wrap;gap:6px}.pfphotos img{width:48%;border:1px solid #ccc}</style></head><body>
+${band(pj.company || settings, false)}
+<div class="sub">Portfolio of evidence – ${esc(fwName(fw))}</div>
+<table class="kv"><tbody><tr><th>Candidate</th><td>${esc(pf.name || "")}</td><th>Evidence items</th><td>${items.length}</td></tr></tbody></table>
+${items.length > 1 ? matrix : ""}
+${items.map((it, k) => nvqItemHtml(pj, Object.assign({}, it, { title: (items.length > 1 ? "E" + (k + 1) + " – " : "") + (it.title || "Evidence") }), fw)).join("")}
+<h2>Declaration</h2><p class="note">I confirm that the evidence in this portfolio is my own work, carried out by me, and that witness statements were given by the people named.</p>
+<table class="kv"><tbody><tr><th>Candidate</th><td>${esc(pf.name || "")}</td><th>Date</th><td>${esc(ukDate(pf.sigDate))}</td></tr><tr><th>Signature</th><td colspan="3">${pf.sig ? `<img src="${pf.sig}" alt="" style="max-height:60px">` : ""}</td></tr></tbody></table>
+</body></html>`;
+}
+async function nvqAi(kind){
+  const pj = portfolioJob(), it = pj.portfolio.items.find(x => x.id === view.pfItem), m = document.getElementById("nvqaimsg");
+  if (!it || !String(it.account || "").trim()) { if (m) m.innerHTML = `<div class="errline">Write (or dictate) your account first – even rough notes.</div>`; return; }
+  if (!settings.sendUrl) { if (m) m.innerHTML = `<div class="errline">Set up sync first – the AI works through your Google script.</div>`; return; }
+  if (m) m.innerHTML = `<div class="muted small"><span class="pulse"></span> Working…</div>`;
+  const system = kind === "wit"
+    ? "You draft a short witness testimony for a UK electrician's NVQ portfolio, written in the first person as the witness, in plain English. Only state what the candidate's account says was done – invent nothing. Leave [square brackets] for anything the witness must fill in. Reply with the statement text only."
+    : "You tidy a UK electrician's NVQ portfolio factual account. Keep it in the first person, past tense, plain English, in logical order (arrival, safe isolation, work done, decisions and why, testing and results, handover). Keep every fact the electrician gave and do NOT add any work, tests or readings they didn't mention – where something an assessor would expect is missing, add it as a [bracketed note] for them to fill in. Reply with the account text only.";
+  try {
+    const o = await api("ask", { question: (kind === "wit" ? `Candidate: ${pj.portfolio.name || settings.inspector}. Date: ${it.date || "[date]"}. Site: ${it.where || "[site]"}. Candidate's account:\n` : "Account to tidy:\n") + it.account, system, maxTokens: 1500 });
+    const t = String(o.answer || "").replace(/\*\*/g, "").replace(/^#+\s*/gm, "").trim(); if (!t) throw new Error("Nothing came back – try again.");
+    if (kind === "wit") { it.wit = it.wit || {}; it.wit.text = t; } else { it.accountOrig = it.accountOrig || it.account; it.account = t; }
+    markDirty(pj); rerender(); toast(kind === "wit" ? "Statement drafted – the witness must read it and change anything that isn't right before signing" : "Account tidied – check it's all true before using it");
+  } catch(err){ const m2 = document.getElementById("nvqaimsg"); if (m2) m2.innerHTML = `<div class="errline">${esc(err.message || err)}</div>`; }
 }
 
 /* ---------------- customers (built from the jobs) */
@@ -2461,6 +2586,7 @@ function render(){
   else if (view.screen === "ask") html = renderAsk();
   else if (view.screen === "train") html = renderTrain();
   else if (view.screen === "customers") html = renderCustomers();
+  else if (view.screen === "nvq") html = renderNvq();
   else if (view.screen === "customer") html = renderCustomer();
   else if (view.screen === "quiz" && view.quiz) { html = renderQuiz(); if (view.quiz.limitMin && !view.quiz.done) setTimeout(tickQuiz, 0); }
   else if (view.screen === "am2e") html = renderAm2e();
@@ -2520,6 +2646,7 @@ function renderHome(){
       <button class="tile" data-act="ask"><b>Ask the regs</b><span>AI answers with reg numbers</span></button>
       <button class="tile" data-act="train"><b>Training</b><span>EWA · AM2E · 2391 practice</span></button>
       <button class="tile" data-act="customers"><b>Customers</b><span>Contacts, addresses, job history</span></button>
+      <button class="tile" data-act="nvq"><b>NVQ portfolio</b><span>Log evidence as you work</span></button>
       ${billingOk() ? "" : "<!--"}<button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>${billingOk() ? "" : "-->"}
       <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} re-inspection${dueList().length === 1 ? "" : "s"} to chase</span></button>
     </div>
@@ -3242,6 +3369,25 @@ document.addEventListener("click", e => {
     case "due": view = {screen:"due"}; render(); break;
     case "ask": view = {screen:"ask"}; render(); break;
     case "train": view = {screen:"train"}; render(); break;
+    case "nvq": view = {screen:"nvq"}; render(); break;
+    case "nvqFw": { const pj = portfolioJob(true); pj.portfolio.fw = a.dataset.v; markDirty(pj); rerender(); break; }
+    case "nvqNew": { const pj = portfolioJob(true), it = { id: uid(), date: today(), title: "", units: {}, types: { photo: true }, photos: [] }; pj.portfolio.items.push(it); markDirty(pj); view.pfItem = it.id; render(); break; }
+    case "nvqFromJob": view.nvqPick = !view.nvqPick; rerender(); break;
+    case "nvqUseJob": { const pj = portfolioJob(true), src = jobs.find(x => x.id === a.dataset.id); if (!src) break;
+      const t = typeOf(src), circ = (src.boards || []).reduce((n, b2) => n + b2.circuits.length, 0);
+      const acct = `${TYPE_LONG[t] || t} at ${jobTitle(src)} on ${ukDate(src.inspDate)}${src.reportNo ? " (" + src.reportNo + ")" : ""}.${circ ? ` ${circ} circuit${circ === 1 ? "" : "s"} on ${src.boards.length} board${src.boards.length === 1 ? "" : "s"}.` : ""}${t === "EICR" ? " Overall: " + outcomeText(src) + "." : ""}
+
+[Describe what YOU did: safe isolation, the work, tests carried out and results, decisions you made, handover.]`;
+      const it = { id: uid(), date: src.inspDate || today(), title: `${TYPES[t] || t} – ${jobTitle(src)}`, where: String(src.address || "").split("\n").slice(-1)[0] || "", setting: /domestic/i.test(src.premises || "") ? "Domestic" : src.premises ? "Commercial" : "", account: acct, units: {}, types: { certificate: true, photo: true }, photos: [], jobRef: src.id };
+      pj.portfolio.items.push(it); markDirty(pj); view.nvqPick = false; view.pfItem = it.id; render(); break; }
+    case "nvqOpen": view.pfItem = a.dataset.id; render(); break;
+    case "nvqBack": view.pfItem = null; view.confirmDel = null; render(); break;
+    case "nvqType": { const pj = portfolioJob(), it = pj.portfolio.items.find(x => x.id === view.pfItem); it.types = it.types || {}; it.types[a.dataset.v] = !it.types[a.dataset.v]; markDirty(pj); rerender(); break; }
+    case "nvqAi": nvqAi("acct"); break;
+    case "nvqWitDraft": nvqAi("wit"); break;
+    case "nvqDel": { const pj = portfolioJob(); pj.portfolio.items = pj.portfolio.items.filter(x => x.id !== view.pfItem); markDirty(pj); view.pfItem = null; view.confirmDel = null; render(); break; }
+    case "nvqPrintItem": { const pj = portfolioJob(), it = pj.portfolio.items.find(x => x.id === view.pfItem); if (!it) break; (async () => { await loadJobPhotos(pj); const ref = it.jobRef && jobs.find(x => x.id === it.jobRef && !x.deleted); let html = nvqPackHtml(pj, [it]); if (ref) { await loadJobPhotos(ref); html = html.replace("</body>", `<div style="page-break-before:always"></div>` + exportHtml(ref).replace(/^[\s\S]*?<body>/, "").replace(/<\/body>[\s\S]*$/, "") + "</body>"); } printHtml(html); })(); break; }
+    case "nvqExport": { const pj = portfolioJob(); if (!pj || !pj.portfolio.items.length) { toast("Add some evidence first"); break; } (async () => { await loadJobPhotos(pj); printHtml(nvqPackHtml(pj, pj.portfolio.items.slice().sort((x, y) => String(x.date).localeCompare(String(y.date))))); })(); break; }
     case "customers": view = {screen:"customers", custQ: view.custQ || ""}; render(); break;
     case "cust": view = {screen:"customer", custKey: a.dataset.k}; render(); break;
     case "custNew": { const c = customers().find(x => x.key === view.custKey); const nj = newJob(a.dataset.type); if (c) { nj.client = Object.assign(nj.client || {}, { name: c.name, phone: c.phone, email: c.email, address: (c.jobs[0].client && c.jobs[0].client.address) || "" }); nj.address = c.jobs.slice().sort((x, y) => String(y.inspDate).localeCompare(String(x.inspDate)))[0].address || ""; }
