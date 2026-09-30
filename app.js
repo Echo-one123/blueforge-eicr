@@ -738,6 +738,8 @@ function openViewer(id){
   v.hidden = false;
 }
 document.addEventListener("change", e => {
+  const am = e.target.closest && e.target.closest("[data-am2e]");
+  if (am) { tr().am2e[am.dataset.am2e] = am.checked; flush(); const h = am.closest(".card") && am.closest(".card").querySelector(".count"); if (h) { const box = am.closest(".card"); h.textContent = box.querySelectorAll("[data-am2e]:checked").length + "/" + box.querySelectorAll("[data-am2e]").length; } return; }
   const rb = e.target.closest && e.target.closest("[data-readboard]");
   if (rb && rb.files && rb.files[0]) { clearPhotoPending(); const f = rb.files[0]; readBoardFromFile(rb.dataset.readboard, f); rb.value = ""; return; }
   const rs = e.target.closest && e.target.closest("select[data-rb]");
@@ -1344,6 +1346,136 @@ function billingCard(){
     <label class="field" for="ownercode"><span>Owner passcode</span><input id="ownercode" type="password" autocomplete="off" class="num"></label>
     <button class="btn sm" data-act="billingOn" ${settings.sendUrl ? "" : "disabled"}>Unlock owner access</button><div id="billmsg"></div>`}</div>`;
 }
+
+/* ---------------- training (EWA / AM2E / 2391) */
+const DAY = 86400000, SR_GAPS = [0, 1, 3, 7, 14, 30];
+const tr = () => { const t = settings.train = settings.train || {}; t.s = t.s || {}; t.am2e = t.am2e || {}; t.hist = t.hist || []; t.ai = t.ai || []; return t; };
+const allQ = () => (window.BF_QB || []).concat(tr().ai);
+const qById = id => allQ().find(q => q.id === id);
+const shuffle = a => { const b = a.slice(); for (let i = b.length - 1; i > 0; i--) { const k = Math.floor(Math.random() * (i + 1)); [b[i], b[k]] = [b[k], b[i]]; } return b; };
+function srMark(id, right){
+  const s = tr().s, r = s[id] = s[id] || { b: 0, d: 0, r: 0, w: 0 };
+  if (right) { r.r++; r.b = Math.min(5, (r.b || 0) + 1); } else { r.w++; r.b = 1; }
+  r.d = Date.now() + (right ? SR_GAPS[r.b] * DAY : 10 * 60000); r.last = right ? 1 : 0; r.at = Date.now();
+}
+const dueIds = () => Object.entries(tr().s).filter(([id, r]) => r.d <= Date.now() && qById(id)).sort((a, b) => a[1].d - b[1].d).map(([id]) => id);
+const weakIds = () => Object.entries(tr().s).filter(([id, r]) => r.last === 0 && qById(id)).map(([id]) => id);
+function topicStats(){
+  const out = {}; allQ().forEach(q => { const k = q.topic, o = out[k] = out[k] || { area: q.area || "AI questions", n: 0, seen: 0, r: 0, w: 0 }; o.n++; const s = tr().s[q.id]; if (s) { o.seen++; o.r += s.r; o.w += s.w; } }); return out;
+}
+function pickQuick(n){ // unseen and weak first, then the rest
+  const s = tr().s, all = shuffle(allQ());
+  const score = q => { const r = s[q.id]; return !r ? 0 : r.last === 0 ? 1 : r.d <= Date.now() ? 2 : 3; };
+  return all.sort((a, b) => score(a) - score(b)).slice(0, n).map(q => q.id);
+}
+function startQuiz(mode, ids, title, limitMin){
+  if (!ids.length) { toast("Nothing to practise there yet"); return; }
+  view = { screen: "quiz", quiz: { mode, ids, i: 0, picks: {}, start: Date.now(), limitMin: limitMin || 0, title, done: false } }; render();
+}
+function renderTrain(){
+  const st = topicStats(), t = tr(), seen = Object.keys(t.s).length, tot = allQ().length;
+  const rr = Object.values(t.s).reduce((a, r) => [a[0] + r.r, a[1] + r.r + r.w], [0, 0]), acc = rr[1] ? Math.round(rr[0] / rr[1] * 100) : null;
+  const due = dueIds().length, weak = weakIds().length;
+  const am = window.BF_AM2E, amTot = am ? am.sections.reduce((n, s) => n + s.items.length, 0) : 0, amDone = Object.values(t.am2e).filter(Boolean).length;
+  const areas = {}; Object.entries(st).forEach(([k, o]) => (areas[o.area] = areas[o.area] || []).push([k, o]));
+  const bar = o => { const p = o.r + o.w ? Math.round(o.r / (o.r + o.w) * 100) : null; return `<div class="tbar"><i style="width:${p ?? 0}%;background:${p === null ? "transparent" : p >= 80 ? "var(--pass)" : p >= 60 ? "var(--check)" : "var(--fail)"}"></i></div><span class="small muted">${o.seen}/${o.n}${p === null ? "" : " · " + p + "%"}</span>`; };
+  return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Training<span class="sub">EWA · AM2E · 2391</span></h1></header>
+  <main>
+    <div class="card"><div class="tstats"><div><b>${seen}</b><span>of ${tot} tried</span></div><div><b>${acc === null ? "–" : acc + "%"}</b><span>correct</span></div><div><b>${due}</b><span>due to revise</span></div></div>
+      <div class="tiles">
+        <button class="tile" data-act="trQuick"><b>Quick 10</b><span>New and missed questions first</span></button>
+        <button class="tile" data-act="trCards" ${due ? "" : "disabled"}><b>Revise (${due})</b><span>Flashcards – missed ones come back</span></button>
+        <button class="tile" data-act="trCalc"><b>Calculations</b><span>15 by hand – pen and paper</span></button>
+        <button class="tile" data-act="trWeak" ${weak ? "" : "disabled"}><b>Weak spots (${weak})</b><span>Ones you last got wrong</span></button>
+        <button class="tile" data-act="trMock"><b>Mock exam</b><span>40 questions · 60 min · marked at the end</span></button>
+        <button class="tile" data-act="am2e"><b>AM2E checklist</b><span>${amDone}/${amTot} ticked off</span></button>
+      </div></div>
+    ${Object.entries(areas).map(([area, list]) => `<div class="card"><h2>${esc(area)}</h2>${list.sort((a, b) => a[0].localeCompare(b[0])).map(([k, o]) => `<button class="card-link trtopic" data-act="trTopic" data-t="${esc(k)}"><div class="grow"><div class="t">${esc(k)}</div>${bar(o)}</div></button>`).join("")}</div>`).join("")}
+    <div class="card"><h2>Make more questions (AI)</h2><div class="muted small">The AI writes fresh questions on any topic, with full working. They're marked "AI – not checked": treat them as extra practice, not gospel. Needs signal.</div>
+      <label class="field" for="aitopic"><span>Topic</span><input id="aitopic" placeholder="e.g. voltage drop on long SWA runs, Section 701 zones"></label>
+      <div class="row"><button class="btn sm" data-act="trAiGen">Make 5 questions</button>${t.ai.length ? `<span class="small muted">${t.ai.length} AI questions saved</span><button class="btn ghost sm" data-act="trAiClear">Remove them</button>` : ""}</div><div id="aigenmsg"></div></div>
+    ${t.hist.length ? `<div class="card"><h2>Recent</h2>${t.hist.slice(-6).reverse().map(h => `<div class="row small"><span>${esc(h.title)}</span><span class="spacer"></span><b>${h.score}/${h.n}</b><span class="muted">${esc(agoText(h.at))}</span></div>`).join("")}</div>` : ""}
+    <div class="muted small" style="padding:0 4px 20px">Questions are original, written for this app and independently checked against BS 7671:2018+A2 and GN3. Always confirm against your own books before the exam. Progress is kept on this device.</div>
+  </main>`;
+}
+function renderQuiz(){
+  const z = view.quiz, n = z.ids.length;
+  if (z.done) return renderQuizEnd();
+  const q = qById(z.ids[z.i]); if (!q) { z.i = Math.min(z.i + 1, n - 1); return renderQuizEnd(); }
+  const pick = z.picks[q.id], mock = z.mode === "mock", show = !mock && pick !== undefined;
+  const left = z.limitMin ? Math.max(0, z.limitMin * 60000 - (Date.now() - z.start)) : 0;
+  const opt = (o, i) => { let cls = ""; if (show) cls = i === q.answer ? "right" : i === pick ? "wrong" : "dim"; else if (pick === i) cls = "picked";
+    return `<button class="qopt ${cls}" data-act="qPick" data-i="${i}" ${show ? "disabled" : ""}><span>${"ABCD"[i]}</span>${esc(o)}</button>`; };
+  return `<header class="top"><button class="iconbtn" data-act="qQuit" aria-label="Stop">✕</button><h1>${esc(z.title)}<span class="sub">Question ${z.i + 1} of ${n}${z.limitMin ? ` · <span id="qtimer">${Math.floor(left / 60000)}:${String(Math.floor(left / 1000) % 60).padStart(2, "0")}</span> left` : ""}</span></h1></header>
+  <main>
+    <div class="qprog"><i style="width:${Math.round((z.i + (show || (mock && pick !== undefined) ? 1 : 0)) / n * 100)}%"></i></div>
+    <div class="card"><div class="row small muted"><span>${esc(q.topic)}</span><span class="spacer"></span>${q.ai ? pill("check","AI – not checked") : ""}${q.calc ? pill("none","calc") : ""}</div>
+      <div class="qtext">${esc(q.q)}</div>
+      ${q.calc && !show ? `<div class="muted small">Work it out on paper first – formula, numbers in, answer – then pick.</div>` : ""}
+      <div class="qopts">${q.options.map(opt).join("")}</div>
+      ${show ? `<div class="qexp ${pick === q.answer ? "ok" : "no"}"><b>${pick === q.answer ? "Correct." : "Not quite – the answer is " + "ABCD"[q.answer] + "."}</b>${mdLite(q.explain)}${q.ref ? `<div class="small muted">Ref: ${esc(q.ref)}</div>` : ""}</div>` : ""}
+    </div>
+    <div class="row">${mock && z.i > 0 ? `<button class="btn ghost" data-act="qPrev">‹ Back</button>` : ""}<span class="spacer"></span>
+      ${show || mock ? `<button class="btn" data-act="qNext">${z.i < n - 1 ? "Next ›" : mock ? "Finish & mark" : "See results"}</button>` : ""}</div>
+    ${mock ? `<div class="qgrid">${z.ids.map((id, k) => `<button class="${k === z.i ? "cur" : ""} ${z.picks[id] !== undefined ? "done" : ""}" data-act="qJump" data-i="${k}">${k + 1}</button>`).join("")}</div>` : ""}
+  </main>`;
+}
+function finishQuiz(){
+  const z = view.quiz; if (z.done) return; z.done = true;
+  if (z.mode === "mock") z.ids.forEach(id => { const q = qById(id); if (q && z.picks[id] !== undefined) srMark(id, z.picks[id] === q.answer); });
+  const score = z.ids.filter(id => { const q = qById(id); return q && z.picks[id] === q.answer; }).length;
+  tr().hist.push({ at: Date.now(), title: z.title, n: z.ids.length, score }); while (tr().hist.length > 50) tr().hist.shift();
+  lsWrite();
+}
+function renderQuizEnd(){
+  const z = view.quiz; finishQuiz();
+  const qs = z.ids.map(qById).filter(Boolean), right = qs.filter(q => z.picks[q.id] === q.answer), wrong = qs.filter(q => z.picks[q.id] !== q.answer);
+  const pct = qs.length ? Math.round(right.length / qs.length * 100) : 0;
+  const by = {}; qs.forEach(q => { const o = by[q.topic] = by[q.topic] || [0, 0]; o[1]++; if (z.picks[q.id] === q.answer) o[0]++; });
+  return `<header class="top"><button class="iconbtn" data-act="train" aria-label="Back">←</button><h1>${esc(z.title)}<span class="sub">Results</span></h1></header>
+  <main>
+    <div class="card qscore ${pct >= 80 ? "ok" : pct >= 60 ? "mid" : "no"}"><b>${right.length} / ${qs.length}</b><span>${pct}%${z.limitMin ? " · " + Math.round((Date.now() - z.start) / 60000) + " min" : ""}</span></div>
+    <div class="card"><h2>By topic</h2>${Object.entries(by).sort((a, b) => a[1][0] / a[1][1] - b[1][0] / b[1][1]).map(([k, [r, n]]) => `<div class="row small"><span>${esc(k)}</span><span class="spacer"></span><b>${r}/${n}</b></div>`).join("")}</div>
+    ${wrong.length ? `<div class="card"><h2>Go over these (${wrong.length})</h2><div class="muted small">They'll come back in Revise until you get them right.</div>${wrong.map(q => `<div class="qreview"><div class="qtext small">${esc(q.q)}</div>
+      <div class="small">${z.picks[q.id] === undefined ? "Not answered" : `You: <s>${esc(q.options[z.picks[q.id]])}</s>`} · Answer: <b>${esc(q.options[q.answer])}</b></div><div class="small">${mdLite(q.explain)}</div></div>`).join("")}</div>` : ""}
+    <div class="row"><button class="btn" data-act="train">Back to training</button>${wrong.length ? `<button class="btn ghost" data-act="trRetry">Retry the ${wrong.length} missed</button>` : ""}</div>
+  </main>`;
+}
+function renderAm2e(){
+  const m = window.BF_AM2E, t = tr();
+  if (!m) return `<header class="top"><button class="iconbtn" data-act="train">←</button><h1>AM2E checklist</h1></header><main><div class="card">Not loaded.</div></main>`;
+  return `<header class="top"><button class="iconbtn" data-act="train" aria-label="Back">←</button><h1>AM2E checklist<span class="sub">Can I do this? Tick it off.</span></h1></header>
+  <main>
+    ${m.note ? `<div class="warnline small">${esc(m.note)}</div>` : ""}
+    ${m.sections.map(s => { const done = s.items.filter((_, i) => t.am2e[s.id + ":" + i]).length; return `<div class="card"><h2>${esc(s.title)} <span class="count">${done}/${s.items.length}</span></h2>
+      <div class="muted small">${s.time ? `<b>${esc(s.time)}</b> · ` : ""}${esc(s.what || "")}</div>
+      ${s.items.map((it, i) => `<label class="amitem"><input type="checkbox" data-am2e="${esc(s.id + ":" + i)}" ${t.am2e[s.id + ":" + i] ? "checked" : ""}><span>${esc(it)}</span></label>`).join("")}
+      ${s.fails && s.fails.length ? `<details class="more"><summary>Common fail points</summary><div><ul class="small">${s.fails.map(f => `<li>${esc(f)}</li>`).join("")}</ul></div></details>` : ""}</div>`; }).join("")}
+    <div class="card"><h2>On the day</h2><ul class="small">${m.tips.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>
+    <div class="card"><h2>Sources</h2><div class="small">${m.sources.map(x => `<div><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a></div>`).join("")}</div><div class="muted small">Checked ${esc(m.updated || "")}. NET change details – confirm yours with your centre.</div></div>
+  </main>`;
+}
+async function trAiGen(){
+  const topic = ((document.getElementById("aitopic") || {}).value || "").trim(), m = document.getElementById("aigenmsg");
+  if (!topic) { if (m) m.innerHTML = `<div class="errline">Type a topic first.</div>`; return; }
+  if (!settings.sendUrl) { if (m) m.innerHTML = `<div class="errline">Set up sync first – the AI works through your Google script.</div>`; return; }
+  if (m) m.innerHTML = `<div class="muted small"><span class="pulse"></span> Writing questions… (20–40 seconds)</div>`;
+  const system = "You write exam practice questions for an experienced UK electrician preparing for the EWA entry test / AM2E / 2391, based on BS 7671:2018+A2:2022 and GN3. Only use facts you are certain of. For calculations give every value needed in the question and show numbered step-by-step manual working in the explanation. Reply with a JSON array only, no other text.";
+  const question = `Write 5 multiple-choice questions on: ${topic}. Format: [{"q":"...","options":["...","...","...","..."],"answer":0,"explain":"...","ref":"Reg or table if certain, else topic","calc":false}]. Exactly 4 options, one correct, vary the answer position.`;
+  try {
+    const o = await api("ask", { question, system, maxTokens: 3500 });
+    const txt = String(o.answer || ""), mm = txt.match(/\[[\s\S]*\]/); if (!mm) throw new Error("The AI didn't send questions back – try again.");
+    const arr = JSON.parse(mm[0]).filter(q => q && typeof q.q === "string" && Array.isArray(q.options) && q.options.length === 4 && Number.isInteger(q.answer) && q.answer >= 0 && q.answer < 4);
+    if (!arr.length) throw new Error("The AI's questions didn't come through properly – try again.");
+    const made = arr.map(q => ({ id: "ai" + uid(), topic: topic.slice(0, 40), area: "AI questions", q: q.q, options: q.options.map(String), answer: q.answer, explain: String(q.explain || ""), ref: String(q.ref || ""), calc: !!q.calc, ai: true }));
+    tr().ai.push(...made); while (tr().ai.length > 200) tr().ai.shift(); lsWrite();
+    startQuiz("practice", made.map(q => q.id), "AI: " + topic.slice(0, 30));
+  } catch(err){ const m2 = document.getElementById("aigenmsg"); if (m2) m2.innerHTML = `<div class="errline">${esc(/Unknown action/i.test(err.message) ? "Your Google script needs updating – paste in the new script and redeploy." : err.message)}</div>`; }
+}
+let quizTimer = null;
+function tickQuiz(){ clearInterval(quizTimer); quizTimer = setInterval(() => { const z = view.quiz; if (view.screen !== "quiz" || !z || !z.limitMin || z.done) { clearInterval(quizTimer); return; }
+  const left = z.limitMin * 60000 - (Date.now() - z.start); if (left <= 0) { finishQuiz(); render(); return; }
+  const el = document.getElementById("qtimer"); if (el) el.textContent = `${Math.floor(left / 60000)}:${String(Math.floor(left / 1000) % 60).padStart(2, "0")}`; }, 1000); }
 
 /* ---------------- AI regs assistant */
 function mdLite(t){
@@ -2115,6 +2247,9 @@ function render(){
   else if (view.screen === "codes") html = renderCodes();
   else if (view.screen === "due") html = renderDue();
   else if (view.screen === "ask") html = renderAsk();
+  else if (view.screen === "train") html = renderTrain();
+  else if (view.screen === "quiz" && view.quiz) { html = renderQuiz(); if (view.quiz.limitMin && !view.quiz.done) setTimeout(tickQuiz, 0); }
+  else if (view.screen === "am2e") html = renderAm2e();
   else if (view.screen === "money") html = billingOk() ? renderMoney() : renderHome();
   else if (view.screen === "job") { if (curJob() && !curJob().deleted) html = renderJob(); else { view = {screen:"home", tab:"job", board:0, circ:null}; html = renderHome(); } }
   app.innerHTML = html;
@@ -2166,6 +2301,7 @@ function renderHome(){
       <button class="tile" data-act="book"><b>Handbook</b><span>Tables, test methods, calculators</span></button>
       <button class="tile" data-act="codes"><b>Coding guide</b><span>Search C1 · C2 · C3 · FI</span></button>
       <button class="tile" data-act="ask"><b>Ask the regs</b><span>AI answers with reg numbers</span></button>
+      <button class="tile" data-act="train"><b>Training</b><span>EWA · AM2E · 2391 practice</span></button>
       ${billingOk() ? "" : "<!--"}<button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>${billingOk() ? "" : "-->"}
       <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} re-inspection${dueList().length === 1 ? "" : "s"} to chase</span></button>
     </div>
@@ -2805,6 +2941,24 @@ document.addEventListener("click", e => {
     case "clearSigPath": { const [rt, ...rs] = a.dataset.path.split("."); setPath(roots()[rt], rs.join("."), ""); markDirty(job); rerender(); break; }
     case "due": view = {screen:"due"}; render(); break;
     case "ask": view = {screen:"ask"}; render(); break;
+    case "train": view = {screen:"train"}; render(); break;
+    case "am2e": view = {screen:"am2e"}; render(); break;
+    case "trQuick": startQuiz("practice", pickQuick(10), "Quick 10"); break;
+    case "trCards": startQuiz("practice", dueIds().slice(0, 20), "Revise"); break;
+    case "trWeak": startQuiz("practice", shuffle(weakIds()).slice(0, 20), "Weak spots"); break;
+    case "trCalc": startQuiz("practice", shuffle(allQ().filter(q => q.calc)).slice(0, 15), "Calculations"); break;
+    case "trTopic": startQuiz("practice", shuffle(allQ().filter(q => q.topic === a.dataset.t)).slice(0, 20).map(q => q.id), a.dataset.t); break;
+    case "trMock": { const A = shuffle((window.BF_QB || []).filter(q => q.area === "Regs & theory")).slice(0, 20), B = shuffle((window.BF_QB || []).filter(q => q.area === "Calcs & testing")).slice(0, 20); startQuiz("mock", shuffle(A.concat(B)).map(q => q.id), "Mock exam", 60); break; }
+    case "trRetry": { const z = view.quiz; const wrong = z.ids.filter(id => { const q = qById(id); return q && z.picks[id] !== q.answer; }); startQuiz("practice", wrong, "Retry missed"); break; }
+    case "trAiGen": trAiGen(); break;
+    case "trAiClear": tr().ai = []; Object.keys(tr().s).forEach(k => { if (k.startsWith("ai")) delete tr().s[k]; }); lsWrite(); rerender(); break;
+    case "qPick": { const z = view.quiz, q = qById(z.ids[z.i]); if (!q || z.done) break; const i = +a.dataset.i;
+      if (z.mode === "mock") { z.picks[q.id] = i; lsWrite(); rerender(); break; }
+      if (z.picks[q.id] !== undefined) break; z.picks[q.id] = i; srMark(q.id, i === q.answer); lsWrite(); view.keepScroll = true; rerender(); break; }
+    case "qNext": { const z = view.quiz; if (z.i < z.ids.length - 1) { z.i++; render(); } else { finishQuiz(); render(); } break; }
+    case "qPrev": { const z = view.quiz; if (z.i > 0) { z.i--; render(); } break; }
+    case "qJump": view.quiz.i = +a.dataset.i; render(); break;
+    case "qQuit": { const z = view.quiz; const answered = Object.keys(z.picks).length; if (z.mode === "mock" && answered && !z.done) { finishQuiz(); render(); } else { view = {screen:"train"}; render(); } break; }
     case "askGo": askGo(); break;
     case "askTry": { const b2 = document.getElementById("askq"); if (b2) { b2.value = a.dataset.q; settings.askDraft = a.dataset.q; } askGo(); break; }
     case "askCopy": { const h = askLog()[+a.dataset.i]; if (h) { const t = h.q + "\n\n" + h.a; (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast("Copied"), () => toast("Couldn't copy on this device")); } break; }

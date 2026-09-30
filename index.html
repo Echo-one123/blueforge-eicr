@@ -68,6 +68,23 @@ button,input,select,textarea{font:inherit;color:inherit}
 .readcard label.btn{cursor:pointer}
 .ask .q{font-weight:600;margin-bottom:6px}
 .ask .a p{margin:0 0 8px}.ask .a ul,.ask .a ol{margin:0 0 8px;padding-left:20px}.ask .a li{margin:2px 0}
+.tile:disabled{opacity:.45}
+.tstats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;margin-bottom:10px}
+.tstats b{display:block;font-family:var(--f-display);font-size:26px;color:var(--blue)}.tstats span{font-size:12px;color:var(--muted)}
+.card-link.trtopic{text-align:left;justify-content:flex-start}.card-link.trtopic .grow{width:100%;display:grid;grid-template-columns:1fr auto;gap:4px 10px;align-items:center;text-align:left}.card-link.trtopic .t{grid-column:1/-1;text-align:left}
+.tbar{height:6px;border-radius:3px;background:var(--line);overflow:hidden}.tbar i{display:block;height:100%}
+.qprog{height:5px;border-radius:3px;background:var(--line);overflow:hidden;margin-bottom:10px}.qprog i{display:block;height:100%;background:var(--blue)}
+.qtext{font-size:17px;font-weight:600;line-height:1.4;margin:6px 0 10px;white-space:pre-line}
+.qopts{display:flex;flex-direction:column;gap:8px}
+.qopt{display:flex;gap:10px;align-items:flex-start;text-align:left;font:inherit;font-size:15.5px;padding:12px;border:1.5px solid var(--line);border-radius:12px;background:var(--field);color:inherit;cursor:pointer}
+.qopt span{flex:none;width:24px;height:24px;border-radius:50%;background:var(--line);display:grid;place-items:center;font-weight:700;font-size:13px}
+.qopt.picked{border-color:var(--blue);background:var(--blue-soft)}.qopt.right{border-color:var(--pass);background:var(--pass-bg)}.qopt.wrong{border-color:var(--fail);background:var(--fail-bg)}.qopt.dim{opacity:.55}
+.qexp{margin-top:12px;padding:12px;border-radius:12px;font-size:14.5px}.qexp.ok{background:var(--pass-bg)}.qexp.no{background:var(--fail-bg)}.qexp p{margin:4px 0}.qexp ol,.qexp ul{margin:4px 0;padding-left:20px}
+.qgrid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:14px}.qgrid button{font:inherit;font-size:13px;padding:8px 0;border-radius:8px;border:1.5px solid var(--line);background:var(--field);color:inherit}
+.qgrid .done{background:var(--blue-soft);border-color:var(--blue)}.qgrid .cur{outline:2px solid var(--blue)}
+.qscore{text-align:center}.qscore b{display:block;font-family:var(--f-display);font-size:40px}.qscore.ok b{color:var(--pass)}.qscore.mid b{color:var(--check)}.qscore.no b{color:var(--fail)}
+.qreview{border-top:1px solid var(--line);padding:10px 0}.qreview .qtext{font-size:14.5px;margin:0 0 4px}
+.amitem{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--line);font-size:15px;cursor:pointer}.amitem input{width:22px;height:22px;flex:none;margin-top:1px}
 ol.steps{margin:6px 0 8px;padding-left:20px;display:flex;flex-direction:column;gap:6px}
 .top h1{font-family:var(--f-display);font-weight:700;font-size:20px;margin:0;letter-spacing:.02em;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .top .sub{display:block;font-family:var(--f-body);font-weight:400;font-size:12px;opacity:.75;letter-spacing:0;overflow:hidden;text-overflow:ellipsis}
@@ -233,6 +250,7 @@ details.more>div{display:flex;flex-direction:column;gap:12px}
 <div class="voice" id="voice" hidden></div>
 
 <script src="bf-data.js"></script>
+<script src="bf-train.js"></script>
 <script src="app.js"></script>
 
 </body></html>
