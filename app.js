@@ -63,7 +63,7 @@ function devShort(c){
 }
 
 /* ------------------------------------------------------------------ model */
-const DEFAULT_SETTINGS = { lock:"Off", lockAfter:"5", vatReg:"No", vatRate:"20", payTerms:"14", numPrefix:"BF", labelModuleMm:"18", counters:{}, officeEmail:"office@blueforge-engineering.co.uk", sendUrl:"", sendKey:"", autoSend:"Yes", userName:"", role:"Inspector", signOffName:"Adam Fyles", lastSync:0, company:"BlueForge Engineering", inspector:"Adam Fyles", position:"Owner / Inspector", address:"Llandudno, North Wales", phone:"", email:"", reg:"", mft:"", irSerial:"", loopSerial:"", elecSerial:"" };
+const DEFAULT_SETTINGS = { lock:"Off", lockAfter:"5", vatReg:"No", vatRate:"20", payTerms:"14", numPrefix:"BF", labelModuleMm:"18", labFont:"standard", labSize:"L", labBold:"Yes", counters:{}, officeEmail:"office@blueforge-engineering.co.uk", sendUrl:"", sendKey:"", autoSend:"Yes", userName:"", role:"Inspector", signOffName:"Adam Fyles", lastSync:0, company:"BlueForge Engineering", inspector:"Adam Fyles", position:"Owner / Inspector", address:"Llandudno, North Wales", phone:"", email:"", reg:"", mft:"", irSerial:"", loopSerial:"", elecSerial:"" };
 let settings = { ...DEFAULT_SETTINGS };
 
 function newCircuit(no){ return { id:uid(), no:String(no), desc:"", wtype:"A", ref:"C", pts:"", live:"", cpc:"", ctype:"Final", dev:"", rating:"", ka:"6", rcd:"", rcdType:"", len:"", ring:"N", r1:"", rn:"", r2:"", r12:"", R2:"", irv:"500", irll:"", irle:"", pol:"", zs:"", rcdt:"", rcdt5:"", rcdbtn:"", afdd:"", remarks:"" }; }
@@ -858,43 +858,88 @@ const TAPE_H = 128, DPMM = 180 / 25.4;
 const labText = (c) => String(c.label || c.desc || ("Circuit " + (c.no || ""))).replace(/\s+/g, " ").trim();
 function labDevice(c){ const d = devShort(c); if (d === "No device") return ""; return (d.replace(" MCB","") + (c.rcd && !d.includes("RCBO") ? " · " + c.rcd + "mA RCD" : c.rcd ? " " + c.rcd + "mA" : "")).trim(); }
 const labOn = (c) => !c.noLabel;
+// Main switch / RCD / SPD etc. that sit in the board alongside the circuit breakers. pos = index of the circuit it sits before (0 = start).
+const LAB_FONTS = {
+  standard:["Standard", "Arial, Helvetica, Roboto, sans-serif"],
+  narrow:["Narrow", "'Arial Narrow', 'Roboto Condensed', 'Helvetica Neue Condensed', 'AvenirNextCondensed-DemiBold', sans-serif-condensed, sans-serif"],
+  heavy:["Heavy", "'Arial Black', 'Helvetica Neue', sans-serif-black, Arial, sans-serif"],
+  mono:["Typewriter", "'Courier New', Courier, monospace"],
+  serif:["Serif", "'Times New Roman', Times, Georgia, serif"] };
+const LAB_SIZES = { S: 0.7, M: 0.85, L: 1, XL: 1.2 };
+const EXTRA_KINDS = { ms:["MAIN SWITCH",2], rcd:["RCD",2], spd:["SPD",1], other:["",1] };
+function defaultExtras(job, b, bi){
+  const out = [], sup = job.supply || {};
+  const msA = bi === 0 && num(sup.msRating) ? sup.msRating + "A" : "";
+  out.push({ id: uid(), kind:"ms", text:"MAIN SWITCH", sub: msA, pos: 0, mods: 2 });
+  // an RCD in front of each run of RCD-protected MCBs (RCBOs carry their own)
+  let prev = null;
+  b.circuits.forEach((c, i) => { const prot = c.rcd && !String(c.dev || "").includes("RCBO"); const key = prot ? String(c.rcd) : null;
+    if (prot && key !== prev) out.push({ id: uid(), kind:"rcd", text:"RCD", sub: c.rcd + "mA", pos: i, mods: 2 });
+    prev = key; });
+  return out;
+}
+function labExtras(job, b){
+  if (!Array.isArray(b.labExtras)) { b.labExtras = defaultExtras(job, b, job.boards.indexOf(b)); markDirty(job); }
+  return b.labExtras;
+}
+function labItems(job, b, forStrip){
+  const showDev = settings.labDevice !== "No", ex = labExtras(job, b), n = b.circuits.length, items = [];
+  const exItem = e => ({ extra: true, no: "", big: String(e.text || EXTRA_KINDS[e.kind]?.[0] || "").trim() || "DEVICE", small: showDev ? String(e.sub || "") : "", mods: Math.max(1, Math.min(4, Math.round(num(e.mods) || 1))) });
+  for (let p = 0; p <= n; p++) {
+    ex.filter(e => Math.max(0, Math.min(n, Math.round(num(e.pos) ?? 0))) === p).forEach(e => items.push(exItem(e)));
+    if (p < n) { const c = b.circuits[p];
+      if (labOn(c)) items.push({ no: String(c.no || ""), big: labText(c), small: showDev ? labDevice(c) : "", mods: 1, cid: c.id });
+      else if (forStrip) items.push({ blank: true, mods: 1 }); }
+  }
+  return b.labDir === "rtl" ? items.reverse() : items;
+}
 function labelCanvas(b, job){
-  const layout = settings.labLayout || "single", showDev = settings.labDevice !== "No", head = settings.labHead === "Yes";
-  const cs = b.circuits.filter(labOn), cv = document.createElement("canvas"), x = cv.getContext("2d");
-  const fit = (t, max, size, weight) => { let f = size; x.font = `${weight} ${f}px Arial`; while (x.measureText(t).width > max && f > 14) { f -= 2; x.font = `${weight} ${f}px Arial`; } return f; };
+  const layout = settings.labLayout || "single", head = settings.labHead === "Yes";
+  const cv = document.createElement("canvas"), x = cv.getContext("2d");
+  const FF = (LAB_FONTS[settings.labFont] || LAB_FONTS.standard)[1], SC = LAB_SIZES[settings.labSize] || 1, heavy = settings.labFont === "heavy";
+  const BW = heavy ? "900" : settings.labBold === "No" ? "normal" : "bold", NW = heavy ? "900" : "normal";
+  const fnt = (w, px) => `${w === "bold" ? (heavy ? "900" : "bold") : w} ${px}px ${FF}`;
+  const fit = (t, max, size, weight) => { let f = Math.round(size); x.font = fnt(weight, f); while (x.measureText(t).width > max && f > 12) { f -= 1; x.font = fnt(weight, f); } return f; };
   if (layout === "strip") {
-    const mod = Math.round((num(settings.labelModuleMm) || 18) * DPMM);
-    cv.width = Math.max(mod, mod * cs.length); cv.height = TAPE_H;
-    x.fillStyle = "#fff"; x.fillRect(0, 0, cv.width, TAPE_H); x.fillStyle = "#000"; x.strokeStyle = "#000"; x.lineWidth = 2; x.textAlign = "center"; x.textBaseline = "alphabetic";
-    cs.forEach((c, i) => {
-      const x0 = i * mod, cx = x0 + mod / 2; if (i) { x.beginPath(); x.moveTo(x0, 0); x.lineTo(x0, TAPE_H); x.stroke(); }
-      x.font = "bold 30px Arial"; x.fillText(String(c.no || i + 1), cx, 30);
-      const bottom = showDev ? TAPE_H - 26 : TAPE_H - 6;
-      let size = 20, lines;
-      for (;;) { x.font = `${size}px Arial`; lines = []; let line = "";
-        for (const w of labText(c).split(" ")) { const t = line ? line + " " + w : w; if (x.measureText(t).width > mod - 8 && line) { lines.push(line); line = w; } else line = t; }
-        if (line) lines.push(line);
-        if ((lines.length * (size + 2) <= bottom - 38 && lines.every(l => x.measureText(l).width <= mod - 6)) || size <= 12) break; size -= 1; }
-      lines.forEach((l, k) => { if (38 + (k + 1) * (size + 2) <= bottom + 2) x.fillText(l, cx, 36 + (k + 1) * (size + 2) - 2); });
-      if (showDev) { const d = labDevice(c).replace(/ · .*$/, ""); fit(d, mod - 6, 17, "bold"); x.fillText(d, cx, TAPE_H - 8); }
+    const mod = Math.round((num(settings.labelModuleMm) || 18) * DPMM), items = labItems(job, b, true);
+    cv.width = Math.max(mod, items.reduce((n, it) => n + it.mods * mod, 0)); cv.height = TAPE_H;
+    x.fillStyle = "#fff"; x.fillRect(0, 0, cv.width, TAPE_H); x.fillStyle = "#000"; x.strokeStyle = "#000"; x.lineWidth = 2; x.textAlign = "center";
+    let x0 = 0;
+    items.forEach((it, i) => {
+      const w = it.mods * mod, cx = x0 + w / 2; if (i) { x.beginPath(); x.moveTo(x0, 0); x.lineTo(x0, TAPE_H); x.stroke(); }
+      if (!it.blank) {
+        const bottom = it.small ? TAPE_H - 26 : TAPE_H - 6;
+        let top = 36;
+        if (it.no) { const nf = Math.round(30 * Math.min(SC, 1.1)); x.font = fnt("bold", nf); x.fillText(it.no, cx, nf); top = nf + 6; } else top = 4;
+        let size = Math.round((it.extra ? 24 : 20) * SC), lines;
+        for (;;) { x.font = fnt(it.extra ? "bold" : BW === "normal" ? NW : BW, size); lines = []; let line = "";
+          for (const wd of it.big.split(" ")) { const t = line ? line + " " + wd : wd; if (x.measureText(t).width > w - 8 && line) { lines.push(line); line = wd; } else line = t; }
+          if (line) lines.push(line);
+          if ((lines.length * (size + 2) <= bottom - top && lines.every(l => x.measureText(l).width <= w - 6)) || size <= 12) break; size -= 1; }
+        const blockH = lines.length * (size + 2), y0 = it.no ? top : top + Math.max(0, (bottom - top - blockH) / 2);
+        lines.forEach((l, k) => { const y = y0 + (k + 1) * (size + 2) - 2; if (y <= bottom + 2) x.fillText(l, cx, y); });
+        if (it.small) { const d = it.small.replace(/ · .*$/, ""); fit(d, w - 6, 17 * Math.min(SC, 1.15), "bold"); x.fillText(d, cx, TAPE_H - 8); }
+      }
+      x0 += w;
     });
     return cv;
   }
   // separate labels, one after another with cut marks
-  const items = []; if (head) items.push({ big: [b.ref, b.location].filter(Boolean).join(" · ") || "Board", small: `Tested ${ukDate(b.date || job.inspDate)}${job.reportNo ? " · " + job.reportNo : ""}` });
-  cs.forEach(c => items.push({ no: String(c.no || ""), big: labText(c), small: showDev ? labDevice(c) : "" }));
+  const items = labItems(job, b, false);
+  if (head) { const hd = { big: [b.ref, b.location].filter(Boolean).join(" · ") || "Board", small: `Tested ${ukDate(b.date || job.inspDate)}${job.reportNo ? " · " + job.reportNo : ""}` }; if (b.labDir === "rtl") items.push(hd); else items.unshift(hd); }
   const MAXW = 900, PAD = 26, GAP = 18;
-  x.font = "bold 52px Arial";
-  const sized = items.map(it => { const bigT = (it.no ? it.no + "  " : "") + it.big; const bf = fit(bigT, MAXW, it.small ? 50 : 60, "bold"); const bw = x.measureText(bigT).width;
-    let sw = 0, sf = 30; if (it.small) { sf = fit(it.small, MAXW, 30, "bold"); sw = x.measureText(it.small).width; }
+  const sized = items.map(it => { const bigT = (it.no ? it.no + "  " : "") + it.big; const bf = fit(bigT, MAXW, (it.small ? 50 : 60) * SC, BW); const bw = x.measureText(bigT).width;
+    let sw = 0, sf = 30; if (it.small) { sf = fit(it.small, MAXW, 30 * SC, BW); sw = x.measureText(it.small).width; }
     return { ...it, bigT, bf, sf, w: Math.ceil(Math.max(bw, sw, 120) + PAD * 2) }; });
   cv.width = Math.max(1, sized.reduce((n, it) => n + it.w + GAP, 0) - GAP); cv.height = TAPE_H;
   x.fillStyle = "#fff"; x.fillRect(0, 0, cv.width, TAPE_H); x.fillStyle = "#000"; x.strokeStyle = "#000"; x.textAlign = "center";
   let xo = 0;
   sized.forEach((it, i) => {
     const cx = xo + it.w / 2;
-    if (it.small) { x.font = `bold ${it.bf}px Arial`; x.fillText(it.bigT, cx, 62); x.font = `bold ${it.sf}px Arial`; x.fillText(it.small, cx, 108); }
-    else { x.font = `bold ${it.bf}px Arial`; x.fillText(it.bigT, cx, 84); }
+    // centre the text block on the tape whatever the size
+    if (it.small) { const h1 = it.bf * 0.74, h2 = it.sf * 0.74, gap = Math.max(8, it.bf * 0.22), top = (TAPE_H - (h1 + gap + h2)) / 2;
+      x.font = fnt(BW, it.bf); x.fillText(it.bigT, cx, top + h1); x.font = fnt(BW, it.sf); x.fillText(it.small, cx, top + h1 + gap + h2); }
+    else { x.font = fnt(BW, it.bf); x.fillText(it.bigT, cx, (TAPE_H + it.bf * 0.72) / 2); }
     xo += it.w;
     if (i < sized.length - 1) { x.save(); x.setLineDash([8, 8]); x.lineWidth = 2; x.beginPath(); x.moveTo(xo + GAP / 2, 0); x.lineTo(xo + GAP / 2, TAPE_H); x.stroke(); x.restore(); xo += GAP; }
   });
@@ -903,7 +948,7 @@ function labelCanvas(b, job){
 function labelsCsv(job, b){
   const clean = v => String(v ?? "").replace(/²/g, "2").replace(/[–—]/g, "-").replace(/·/g, "-").replace(/[^\x20-\x7E]/g, "").trim();
   const q = v => { const t = clean(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
-  const rows = [["Circuit","Label","Device","Board"]].concat(b.circuits.filter(labOn).map(c => [c.no, labText(c), settings.labDevice === "No" ? "" : labDevice(c), b.ref]));
+  const rows = [["Circuit","Label","Device","Board"]].concat(labItems(job, b, false).map(it => [it.no, it.big, it.small, b.ref]));
   return rows.map(r => r.map(q).join(",")).join("\r\n") + "\r\n";
 }
 async function shareFile(name, blob){
@@ -916,8 +961,8 @@ async function saveLabelPng(job, b){ const cv = labelCanvas(b, job); const blob 
 async function saveLabelCsv(job, b){ await shareFile(labName(job, b, "csv"), new Blob([labelsCsv(job, b)], {type: "text/csv"})); }
 function drawLabelPreview(){
   const box = document.getElementById("labprev"); const job = curJob(); if (!box || !job) return;
-  const b = curBoard(), cv = labelCanvas(b, job), n = b.circuits.filter(labOn).length;
-  cv.className = "labcv"; box.innerHTML = ""; if (n || settings.labHead === "Yes") box.appendChild(cv); else box.innerHTML = `<div class="muted small">No circuits ticked.</div>`;
+  const b = curBoard(), cv = labelCanvas(b, job), n = labItems(job, b, false).length;
+  cv.className = "labcv"; box.innerHTML = ""; if (n || settings.labHead === "Yes") box.appendChild(cv); else box.innerHTML = `<div class="muted small">Nothing ticked.</div>`;
   const m = document.getElementById("labmeta"); if (m) m.textContent = `${n} label${n === 1 ? "" : "s"} · about ${Math.round(cv.width / DPMM / 10)} cm of 24 mm tape`;
 }
 function labelsCard(job){
@@ -925,7 +970,9 @@ function labelsCard(job){
   return `<div class="card"><h2>Circuit labels</h2><div class="muted small">Print a label for every circuit on the Brother on 24 mm tape – nothing is sent anywhere.</div><button class="btn block" data-act="openLabels">Labels</button></div>`;
 }
 function tabLabels(){
-  const job = j(), b = curBoard(), layout = settings.labLayout || "single";
+  const job = j(), b = curBoard(), layout = settings.labLayout || "single", extras = labExtras(job, b);
+  if (!b.labDir) b.labDir = "ltr";
+  const posOpts = e => b.circuits.map((c, k) => `<option value="${k}"${Math.round(num(e.pos) ?? 0) === k ? " selected" : ""}>Before circuit ${esc(c.no || k + 1)}</option>`).join("") + `<option value="${b.circuits.length}"${Math.round(num(e.pos) ?? 0) >= b.circuits.length ? " selected" : ""}>After the last circuit</option>`;
   const boardChips = job.boards.length > 1 ? `<div class="boards" role="group" aria-label="Boards">${job.boards.map((x,i) => `<button class="chip" data-act="board" data-i="${i}" aria-pressed="${i === Math.min(view.board, job.boards.length-1)}">${esc(x.ref || "DB" + (i+1))}</button>`).join("")}</div>` : "";
   const rows = b.circuits.map((c, i) => `<div class="labrow${labOn(c) ? "" : " off"}"><button type="button" class="chip small" data-act="labToggle" data-i="${i}" aria-pressed="${labOn(c)}" aria-label="Print circuit ${esc(c.no)}">${labOn(c) ? "✓" : "–"}</button><b class="cno">${esc(c.no)}</b>
     <input data-bind="board.circuits.${i}.label" value="${esc(c.label || "")}" placeholder="${esc(c.desc || "Circuit " + c.no)}" aria-label="Label for circuit ${esc(c.no)}"><span class="small muted">${esc(labDevice(c))}</span></div>`).join("");
@@ -933,11 +980,22 @@ function tabLabels(){
   <div class="card"><h2>${esc(b.ref || "Board")} labels <span class="count" id="labmeta"></span></h2>
     ${chips("Layout","settings.labLayout",[["single","One label per circuit"],["strip","Strip under the breakers"]])}
     ${layout === "strip" ? field("Breaker width","settings.labelModuleMm",{num:true,unit:"mm",ph:"18",hint:"One section per breaker – 18 mm for most MCBs/RCBOs, 36 mm for double-width."}) : chips("Board name label first","settings.labHead",["Yes","No"])}
+    ${chips("Font","settings.labFont",Object.entries(LAB_FONTS).map(([k, v]) => [k, v[0]]),{small:true})}
+    <div class="grid2">${chips("Text size","settings.labSize",[["S","S"],["M","M"],["L","L"],["XL","XL"]],{small:true})}${chips("Bold","settings.labBold",["Yes","No"],{small:true})}</div>
+    <div class="muted small">Text still shrinks to fit if a name is too long for its space. The picture uses these settings; with the Pro Label Tool list you choose font and size in the Brother app.</div>
     ${chips("Show breaker rating","settings.labDevice",["Yes","No"])}
+    ${chips("Reads (this board)","board.labDir",[["ltr","Left → right"],["rtl","Right → left"]])}
+    <div class="muted small">Right → left if the main switch is on the right of the board – the tape comes out in the order you stick it on.</div>
     <div class="labprev" id="labprev"></div>
     <div class="grid2"><button class="btn" data-act="labCsv">Save list for Pro Label Tool</button><button class="btn ghost" data-act="labPng">Save label picture</button></div>
     <button class="btn ghost sm" data-act="copyLabels">Copy label text</button>
   </div>
+  <div class="card"><h2>Main switch, RCDs &amp; other devices</h2><div class="muted small">Set where each one sits – "before circuit 1" is the start of the board, or put an RCD before the first circuit it feeds.</div>
+    ${extras.map((e, i) => `<div class="exrow"><input data-bind="board.labExtras.${i}.text" value="${esc(e.text || "")}" placeholder="${esc(EXTRA_KINDS[e.kind]?.[0] || "Label")}" aria-label="Device label"><input data-bind="board.labExtras.${i}.sub" value="${esc(e.sub || "")}" placeholder="e.g. 100A / 30mA" aria-label="Rating">
+      <select data-bind="board.labExtras.${i}.pos" data-rerender aria-label="Position">${posOpts(e)}</select>${layout === "strip" ? `<select data-bind="board.labExtras.${i}.mods" data-rerender aria-label="Width">${[1,2,3,4].map(m => `<option value="${m}"${String(m) === String(e.mods) ? " selected" : ""}>${m} way${m > 1 ? "s" : ""} wide</option>`).join("")}</select>` : ""}
+      <button type="button" class="btn ghost sm" data-act="exDel" data-i="${i}">Remove</button></div>`).join("") || `<div class="muted small">None.</div>`}
+    <div class="row"><button class="btn ghost sm" data-act="exAdd" data-kind="ms">+ Main switch</button><button class="btn ghost sm" data-act="exAdd" data-kind="rcd">+ RCD</button><button class="btn ghost sm" data-act="exAdd" data-kind="spd">+ SPD</button><button class="btn ghost sm" data-act="exAdd" data-kind="other">+ Other</button></div>
+    <button class="btn ghost sm" data-act="exReset">Reset to suggested</button></div>
   <div class="card"><h2>Circuits</h2><div class="muted small">Untick any you don't want. Type a shorter name to fit the tape – the certificate keeps the full description.</div>${rows || `<div class="empty">No circuits on this board.</div>`}</div>
   <div class="card"><h2>Printing on the Brother</h2><ol class="small steps">
     <li>Load <b>24 mm TZe tape</b> in the PT-E560BT and turn it on with Bluetooth on.</li>
@@ -2391,7 +2449,7 @@ document.addEventListener("input", e => {
   if (root === "settings") flush();
   else markDirty(j());
   if (el.hasAttribute("data-rerender")) { if (path === "dev") { const c = curCirc(); if (c && ZS[c.dev] && !ZS[c.dev][+c.rating]) c.rating = ""; } rerender(); }
-  else { refreshDerived(); if (view.tab === "labels" && (/\.label$/.test(path) || path === "labelModuleMm")) drawLabelPreview(); if (root === "circ" && (path === "no" || path === "desc")) { const h = document.querySelector(".top h1"); const c = curCirc(); if (h && c) h.innerHTML = `${esc(curBoard().ref)} · Circuit ${esc(c.no)}<span class="sub">${esc(c.desc || "No description")}</span>`; } }
+  else { refreshDerived(); if (view.tab === "labels" && (/\.label$/.test(path) || /^labExtras\.\d+\.(text|sub)$/.test(path) || path === "labelModuleMm")) drawLabelPreview(); if (root === "circ" && (path === "no" || path === "desc")) { const h = document.querySelector(".top h1"); const c = curCirc(); if (h && c) h.innerHTML = `${esc(curBoard().ref)} · Circuit ${esc(c.no)}<span class="sub">${esc(c.desc || "No description")}</span>`; } }
 });
 
 document.addEventListener("click", e => {
@@ -2479,8 +2537,11 @@ document.addEventListener("click", e => {
     case "labels": case "openLabels": view.tab = "labels"; view.circ = null; render(); break;
     case "labToggle": { const c = curBoard().circuits[+a.dataset.i]; if (c) { c.noLabel = !c.noLabel; markDirty(job); rerender(); } break; }
     case "labCsv": saveLabelCsv(job, curBoard()); break;
+    case "exAdd": { const b = curBoard(), k = a.dataset.kind, [t, m] = EXTRA_KINDS[k]; labExtras(job, b).push({ id: uid(), kind: k, text: t, sub: k === "rcd" ? "30mA" : "", pos: 0, mods: m }); markDirty(job); rerender(); break; }
+    case "exDel": { const b = curBoard(); labExtras(job, b).splice(+a.dataset.i, 1); markDirty(job); rerender(); break; }
+    case "exReset": { const b = curBoard(); b.labExtras = defaultExtras(job, b, job.boards.indexOf(b)); markDirty(job); rerender(); break; }
     case "labPng": saveLabelPng(job, curBoard()); break;
-    case "copyLabels": { const t = curBoard().circuits.filter(labOn).map(c => `${c.no} ${labText(c)} ${settings.labDevice === "No" ? "" : labDevice(c)}`.replace(/\s+/g, " ").trim()).join("\n");
+    case "copyLabels": { const t = labItems(job, curBoard(), false).map(it => `${it.no} ${it.big} ${it.small}`.replace(/\s+/g, " ").trim()).join("\n");
       const done = () => toast(`Copied ${curBoard().circuits.length} labels – paste them into Pro Label Tool one per breaker`);
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, () => toast(t)); else toast(t); break; }
     case "openDanger": view.tab = "danger"; render(); break;

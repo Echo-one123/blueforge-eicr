@@ -54,6 +54,10 @@ button,input,select,textarea{font:inherit;color:inherit}
 .labrow input{min-width:0;width:100%;font:inherit;font-size:16px;padding:9px 10px;border:1.5px solid var(--line);border-radius:10px;background:var(--field);color:inherit}
 .labrow > span.small{grid-area:d}
 .labrow.off input,.labrow.off .cno{opacity:.45}
+.exrow{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:6px;padding:8px 0;border-top:1px solid var(--line)}
+.exrow:first-of-type{border-top:0}
+.exrow input,.exrow select{min-width:0;width:100%;font:inherit;font-size:16px;padding:9px 10px;border:1.5px solid var(--line);border-radius:10px;background:var(--field);color:inherit}
+.exrow .btn{justify-self:start}
 ol.steps{margin:6px 0 8px;padding-left:20px;display:flex;flex-direction:column;gap:6px}
 .top h1{font-family:var(--f-display);font-weight:700;font-size:20px;margin:0;letter-spacing:.02em;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .top .sub{display:block;font-family:var(--f-body);font-weight:400;font-size:12px;opacity:.75;letter-spacing:0;overflow:hidden;text-overflow:ellipsis}
