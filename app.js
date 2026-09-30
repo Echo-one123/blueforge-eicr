@@ -63,7 +63,7 @@ function devShort(c){
 }
 
 /* ------------------------------------------------------------------ model */
-const DEFAULT_SETTINGS = { lock:"Off", lockAfter:"5", vatReg:"No", vatRate:"20", payTerms:"14", numPrefix:"BF", labelModuleMm:"18", labFont:"standard", labSize:"L", labBold:"Yes", counters:{}, officeEmail:"office@blueforge-engineering.co.uk", sendUrl:"", sendKey:"", autoSend:"Yes", userName:"", role:"Inspector", signOffName:"Adam Fyles", lastSync:0, company:"BlueForge Engineering", inspector:"Adam Fyles", position:"Owner / Inspector", address:"Llandudno, North Wales", phone:"", email:"", reg:"", mft:"", irSerial:"", loopSerial:"", elecSerial:"" };
+const DEFAULT_SETTINGS = { theme:"Dark", lock:"Off", lockAfter:"5", vatReg:"No", vatRate:"20", payTerms:"14", numPrefix:"BF", labelModuleMm:"18", labFont:"standard", labSize:"L", labBold:"Yes", counters:{}, officeEmail:"office@blueforge-engineering.co.uk", sendUrl:"", sendKey:"", autoSend:"Yes", userName:"", role:"Inspector", signOffName:"Adam Fyles", lastSync:0, company:"BlueForge Engineering", inspector:"Adam Fyles", position:"Owner / Inspector", address:"Llandudno, North Wales", phone:"", email:"", reg:"", mft:"", irSerial:"", loopSerial:"", elecSerial:"" };
 let settings = { ...DEFAULT_SETTINGS };
 
 function newCircuit(no){ return { id:uid(), no:String(no), desc:"", wtype:"A", ref:"C", pts:"", live:"", cpc:"", ctype:"Final", dev:"", rating:"", ka:"6", rcd:"", rcdType:"", len:"", ring:"N", r1:"", rn:"", r2:"", r12:"", R2:"", irv:"500", irll:"", irle:"", pol:"", zs:"", rcdt:"", rcdt5:"", rcdbtn:"", afdd:"", remarks:"" }; }
@@ -2860,8 +2860,46 @@ const icon = n => ({
 }[n] || "");
 
 /* ------------------------------------------------------------------ derived blocks (live-updated) */
+/* ---- circuit readings panel: Zs on a dial against its limit, the other readings under it ---- */
+function readingsPanel(j, b, c){
+  const r = calcCircuit(j, b, c), zs = r.zsUsed, lim = r.m80;
+  const chk = l => r.checks.find(x => x.l === l);
+  const zc = chk("Zs"), zsState = zc ? zc.s : "none";
+  const cls = r.result === "fail" ? "fail" : r.result === "check" ? "check" : r.result === "pass" ? "pass" : "none";
+  // dial: 240° sweep, the limit sits at 75% of it so there's headroom to show a reading over the limit
+  const R = 110, cx = 140, cy = 132, A0 = 210, SW = 240;
+  const pt = f => { const a = (A0 - SW * f) * Math.PI / 180; return [cx + R * Math.cos(a), cy - R * Math.sin(a)]; };
+  const arc = (f0, f1) => { const [x0,y0] = pt(f0), [x1,y1] = pt(f1); return `M${x0.toFixed(1)} ${y0.toFixed(1)} A${R} ${R} 0 ${SW * (f1 - f0) > 180 ? 1 : 0} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`; };
+  const scale = lim ? lim / 0.75 : zs ? zs * 1.5 : 1;
+  const f = zs !== null ? Math.max(0.012, Math.min(1, zs / scale)) : 0;
+  const [lx, ly] = pt(0.75), [tx, ty] = pt(0.75 + 0.0001);
+  const tick = lim ? (() => { const a = (A0 - SW * 0.75) * Math.PI / 180, i = [cx + (R - 16) * Math.cos(a), cy - (R - 16) * Math.sin(a)], o = [cx + (R + 12) * Math.cos(a), cy - (R + 12) * Math.sin(a)], t = [cx + (R + 24) * Math.cos(a), cy - (R + 24) * Math.sin(a)];
+    return `<line x1="${i[0].toFixed(1)}" y1="${i[1].toFixed(1)}" x2="${o[0].toFixed(1)}" y2="${o[1].toFixed(1)}" class="dl-lim"/><text x="${t[0].toFixed(1)}" y="${(t[1] + 4).toFixed(1)}" class="dl-limt">${lim.toFixed(2)}</text>`; })() : "";
+  const dial = `<svg class="dial dl-${zsState}" viewBox="0 0 280 210" role="img" aria-label="${zs !== null ? `Zs ${zs.toFixed(2)} ohms${lim ? `, limit ${lim.toFixed(2)}` : ""}` : "No Zs yet"}">
+    <path d="${arc(0, 1)}" class="dl-bg"/>${lim ? `<path d="${arc(0, 0.75)}" class="dl-zone"/>` : ""}
+    ${zs !== null ? `<path d="${arc(0, f)}" class="dl-glow"/><path d="${arc(0, f)}" class="dl-val"/>` : ""}${tick}</svg>`;
+  const lbl = zs === null ? "" : `Zs${r.zsCalc ? " (Zdb + R1+R2)" : ""}${lim ? `, limit ${lim.toFixed(2)} Ω${c.dev && c.rating ? " for " + esc(((String(c.dev).match(/Type ([A-D])\b/) || [])[1] || "") + c.rating + (/Type [A-D]\b/.test(c.dev) ? "" : " A")) : ""}` : r.maxNote ? ", no tabulated limit" : ", pick device for the limit"}`;
+  const firstBad = r.checks.find(x => x.s === r.result);
+  const verdict = cls === "pass" ? "Pass, all readings in limits" : cls === "fail" ? `Fail: ${firstBad ? firstBad.l : ""}` : cls === "check" ? `Check: ${firstBad ? firstBad.l : ""}` : "Enter readings below";
+  const n = v => { const x = String(v ?? "").trim(); return x === "" ? null : x; };
+  const cell = (k, v, u, note, st) => `<div class="rcell ${st || ""}"><span class="k">${k}</span><span class="v">${v === null ? "–" : esc(v)}${v === null ? "" : `<small>${u}</small>`}</span><span class="lim">${note}</span></div>`;
+  const irLow = (() => { const a = [n(c.irll), n(c.irle)].filter(Boolean); if (!a.length) return null; const nums = a.map(x => /^>/.test(x) ? 1e9 : parseFloat(x)); const i = nums.indexOf(Math.min(...nums)); return a[i]; })();
+  const st = l => { const x = chk(l); return x ? x.s : ""; };
+  const cells = [
+    cell("R1+R2", n(c.r12), "Ω", r.expR12 !== null ? `expected ${r.expR12.toFixed(2)}` : "&nbsp;", st("R1+R2")),
+    cell("Insulation, lowest", irLow, "MΩ", `minimum ${+c.irv === 250 ? "0.5" : "1"}`, st("Insulation")),
+    c.rcd ? cell("RCD trip", n(c.rcdt), "ms", /S-type/.test(c.rcdType) ? "130 to 500" : "maximum 300", st("RCD")) : cell("Polarity", c.pol || null, "", "&nbsp;", st("Polarity")),
+    c.ring === "Y" ? `<div class="rcell ${st("Ring")}"><span class="k">Ring ends r1 / rn / r2</span><span class="v sm">${[c.r1, c.rn, c.r2].map(x => n(x) === null ? "–" : esc(x)).join(" / ")}</span><span class="lim">r1 and rn within 0.05</span></div>`
+      : cell("Measured Zs", n(c.zs), "Ω", r.expZs !== null ? `expected ${r.expZs.toFixed(2)}` : "&nbsp;", st("Zs"))
+  ].join("");
+  return `<div class="panel pn-${cls}">
+    <div class="dialwrap">${dial}<div class="dialval">${zs !== null ? `<b>${zs.toFixed(2)}</b><span class="u">Ω</span>` : `<b class="none">–</b>`}<div class="l">${zs !== null ? lbl : "Zs appears here"}</div></div></div>
+    <div class="verdict"><span class="vdot"></span>${esc(verdict)}<span class="spacer"></span><span data-derived="cpill">${resultPill(r.result)}</span></div>
+  </div><div class="rcells">${cells}</div>`;
+}
 const DERIVED = {
   prevc(){ const c = curCirc(); return c ? prevCard(c) : ""; },
+  panel(){ const j = curJob(), b = curBoard(), c = curCirc(); return c ? readingsPanel(j, b, c) : ""; },
   design(){
     const j = curJob(), b = curBoard(), c = curCirc(); if (!c) return "";
     const r = calcCircuit(j, b, c);
@@ -2899,6 +2937,7 @@ function refreshDerived(){ document.querySelectorAll("[data-derived]").forEach(e
 
 /* ------------------------------------------------------------------ screens */
 function render(){
+  document.documentElement.dataset.theme = settings.theme === "Light" ? "light" : "dark";
   const app = document.getElementById("app");
   const y = window.scrollY;
   let html = "";
@@ -2936,56 +2975,99 @@ function jobPill(j){
   if (t === "EICR") return s.status === "fail" ? pill("fail","UNSATISFACTORY") : s.status === "pass" && s.tested ? pill("pass","SATISFACTORY") : pill("none","In progress");
   return s.status === "fail" ? pill("fail","TEST FAILURES") : s.status === "pass" ? pill("pass","ALL PASSED") : pill("none","In progress");
 }
+/* ---- home: progress of a job, the ring that shows it, and the job you're in the middle of ---- */
+function jobProgress(j){
+  const t = typeOf(j), s = jobSummary(j);
+  const hasBoards = !FORMS[t] && t !== "PAT";
+  const out = { tested: s.tested || 0, total: s.total || 0, next: null, look: null, done: false, unit: "circuits" };
+  if (t === "PAT") out.unit = "items";
+  else if (FORMS[t]) out.unit = (((FORMS[t].tables[0] || {}).row) || "item").toLowerCase() + "s";
+  if (hasBoards){
+    j.boards.some((b, bi) => b.circuits.some(c => { const r = calcCircuit(j, b, c);
+      if (!out.look && (r.result === "fail" || r.result === "check")) { const x = r.checks.find(k => k.s === r.result) || {}; out.look = { bi, c, text: `${j.boards.length > 1 ? b.ref + " " : ""}circuit ${c.no}, ${x.l ? x.l + (r.result === "fail" ? " failed" : " to check") : "check it"}`, s: r.result }; }
+      if (!out.next && r.result === "none") out.next = { bi, c, text: `${j.boards.length > 1 ? b.ref + " " : ""}circuit ${c.no}${c.desc ? ", " + c.desc : ""}` };
+      return false; }));
+  }
+  out.done = !!(j.sentAt || j.sendQueued || j.sig);
+  return out;
+}
+function ringSvg(frac, size, cls){
+  const r = 42, C = 2 * Math.PI * r, f = Math.max(0, Math.min(1, frac || 0));
+  return `<svg class="${cls || ""}" viewBox="0 0 100 100" width="${size}" height="${size}" aria-hidden="true"><circle cx="50" cy="50" r="${r}" class="rg-bg"/>${f > 0 ? `<circle cx="50" cy="50" r="${r}" class="rg-fg" stroke-dasharray="${(C*f).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 50 50)"/>` : ""}</svg>`;
+}
+function jobRing(j){
+  const p = jobProgress(j), s = jobSummary(j);
+  if (j.handoff && !j.sig && billingOk()) return `<span class="jring sign">${ringSvg(1, 46)}<b>Sign</b></span>`;
+  if (p.done) return `<span class="jring ${s.status === "fail" ? "bad" : "ok"}">${ringSvg(1, 46)}<b>${s.status === "fail" ? "!" : "✓"}</b></span>`;
+  if (!p.total) return `<span class="jring">${ringSvg(0, 46)}<b>–</b></span>`;
+  return `<span class="jring">${ringSvg(p.tested / p.total, 46)}<b>${p.tested}/${p.total}</b></span>`;
+}
 function jobCard(j){
   const circ = typeOf(j) === "PAT" ? ((j.pat && j.pat.items) || []).length : FORMS[typeOf(j)] ? formSummary(j).rows : j.boards.reduce((n,b) => n + b.circuits.length, 0);
   const unit = typeOf(j) === "PAT" ? "item" : FORMS[typeOf(j)] ? ((FORMS[typeOf(j)].tables[0] || {}).row || "item").toLowerCase() : "circuit";
-  const extra = [];
+  const extra = [jobPill(j)];
   if (!j.example && (j.sentAt || j.sendQueued)) extra.push(sendStatus(j));
   if (j.handoff && settings.role === "Tester") extra.push(pill("none", "Sent for sign-off"));
-  return `<button class="card-link" data-act="open" data-id="${esc(j.id)}"><div class="grow"><div class="t">${esc(jobTitle(j))}</div><div class="d"><span class="typetag">${esc(TYPES[typeOf(j)])}</span> ${esc(ukDate(j.inspDate))}${j.reportNo ? " · " + esc(j.reportNo) : ""} · ${circ} ${unit}${circ === 1 ? "" : "s"}${j.example ? ' · <span class="ex-tag">Example</span>' : ""}</div>${extra.length ? `<span class="row" style="gap:6px;margin-top:4px">${extra.join("")}</span>` : ""}</div>${jobPill(j)}</button>`;
+  return `<button class="card-link jobrow" data-act="open" data-id="${esc(j.id)}"><div class="grow"><div class="t">${esc(jobTitle(j))}</div><div class="d"><span class="typetag">${esc(TYPES[typeOf(j)])}</span> ${esc(ukDate(j.inspDate))}${j.reportNo ? ", " + esc(j.reportNo) : ""}, ${circ} ${unit}${circ === 1 ? "" : "s"}${j.example ? ' <span class="ex-tag">Example</span>' : ""}</div><span class="row" style="gap:6px;margin-top:5px">${extra.join("")}</span></div>${jobRing(j)}</button>`;
 }
-function homeList(){
+function liveJob(){
+  return liveJobs().filter(j => !j.sentAt && !j.sendQueued && !j.sig && !j.handoff).sort((a,b) => (b.updated||0) - (a.updated||0))[0] || null;
+}
+function liveCard(j){
+  const p = jobProgress(j), t = typeOf(j), hasBoards = !FORMS[t] && t !== "PAT";
+  const frac = p.total ? p.tested / p.total : 0;
+  const sub = hasBoards ? (p.next ? `${esc(j.boards[p.next.bi].ref)}${j.boards[p.next.bi].location ? ", " + esc(j.boards[p.next.bi].location) : ""}` : j.boards.length ? `${j.boards.length} board${j.boards.length === 1 ? "" : "s"}` : "No boards yet") : esc(TYPES[t]);
+  const next = hasBoards ? (p.next ? esc(p.next.text) : !p.total ? "Add the board and its circuits" : "All circuits tested. Finish the report") : "Carry on with the checks";
+  const btn = hasBoards && p.next ? "Carry on testing" : hasBoards && !p.total ? "Start testing" : "Open job";
+  return `<section class="live" aria-label="Job in progress">
+    <button class="livehead" data-act="open" data-id="${esc(j.id)}"><span class="grow"><b>${esc(jobTitle(j))}</b><span class="sub">${j.reportNo ? esc(j.reportNo) + ", " : ""}${sub}</span></span><span class="typetag">${esc(TYPES[t])}</span></button>
+    <div class="livesum">
+      <div class="bigring">${ringSvg(frac, 96)}<div><b>${p.tested}</b><span>of ${p.total}</span></div></div>
+      <div class="facts"><div><span>Next up</span><strong>${next.charAt(0).toUpperCase() + next.slice(1)}</strong></div>
+        ${p.look ? `<div><span>Needs a look</span><strong class="${p.look.s === "fail" ? "badt" : "ambt"}">${esc(p.look.text[0].toUpperCase() + p.look.text.slice(1))}</strong></div>` : p.total ? `<div><span>So far</span><strong class="okt">Nothing to look at</strong></div>` : ""}</div>
+    </div>
+    <button class="btn block go" data-act="resume" data-id="${esc(j.id)}">${btn}</button>
+  </section>`;
+}
+function homeList(skipId){
   const q = (view.homeQ || "").toLowerCase().trim();
-  const list = liveJobs().filter(j => !q || [j.address, j.client.name, j.reportNo, TYPES[typeOf(j)], j.occupier].join(" ").toLowerCase().includes(q))
+  const list = liveJobs().filter(j => (q || j.id !== skipId) && (!q || [j.address, j.client.name, j.reportNo, TYPES[typeOf(j)], j.occupier].join(" ").toLowerCase().includes(q)))
     .sort((a,b) => (b.updated||0) - (a.updated||0));
-  if (!liveJobs().length) return `<div class="empty"><div>No reports yet. Tap <b>New</b> to start one, or open the example below to see how it works.</div></div>`;
-  if (!list.length) return `<div class="empty">Nothing matches “${esc(view.homeQ)}”.</div>`;
+  if (!liveJobs().length) return `<div class="empty"><div>No jobs yet. Tap <b>+ New EICR</b> to start one, or open the example below to see how it works.</div></div>`;
+  if (!list.length) return q ? `<div class="empty">Nothing matches “${esc(view.homeQ)}”.</div>` : `<div class="muted small" style="padding:0 4px">No other jobs.</div>`;
   return `<div style="display:flex;flex-direction:column;gap:8px">${list.map(jobCard).join("")}</div>`;
 }
 function renderHome(){
   const ready = billingOk() ? liveJobs().filter(j => j.handoff && !j.sig).length : 0;
-  return `<header class="top"><h1>BlueForge<span class="sub brandmark">CERTIFICATES &amp; REPORTS</span></h1><button class="iconbtn" data-act="settings" aria-label="Settings">⚙</button></header>
+  const lj = liveJob(), due = dueList().length;
+  const owed = billingOk() ? liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid").length : 0;
+  return `<header class="top home"><span class="hexmark" aria-hidden="true">BF</span><h1>BlueForge<span class="sub brandmark">${esc(new Date().toLocaleDateString("en-GB", {weekday:"long", day:"numeric", month:"long"}))}</span></h1><button class="iconbtn" data-act="settings" aria-label="Settings">⚙</button></header>
   ${statusHtml()}
   <main>
+    ${scriptBanner()}
+    ${ready ? `<div class="warnline">${ready} job${ready === 1 ? "" : "s"} ready for your sign-off.</div>` : ""}
+    ${lj && !view.chooser ? liveCard(lj) : ""}
     ${view.chooser ? `<div class="card"><h2>New</h2>
       <button class="card-link" data-act="newType" data-type="EICR"><div class="grow"><div class="t">EICR</div><div class="d">Condition report on an existing installation</div></div></button>
       <button class="card-link" data-act="newType" data-type="EIC"><div class="grow"><div class="t">EIC</div><div class="d">New installation, new circuits, consumer unit change</div></div></button>
       <button class="card-link" data-act="newType" data-type="MW"><div class="grow"><div class="t">Minor Works</div><div class="d">Addition or alteration that doesn't add a new circuit</div></div></button>
       <button class="card-link" data-act="newType" data-type="PAT"><div class="grow"><div class="t">PAT register</div><div class="d">Portable appliance testing</div></div></button>
-      ${Object.entries(FORMS).map(([k, f]) => `<button class="card-link" data-act="newType" data-type="${esc(k)}"><div class="grow"><div class="t">${esc(f.name)}</div><div class="d">${esc(f.long)} · ${esc(f.std || "")}</div></div></button>`).join("")}
+      ${Object.entries(FORMS).map(([k, f]) => `<button class="card-link" data-act="newType" data-type="${esc(k)}"><div class="grow"><div class="t">${esc(f.name)}</div><div class="d">${esc(f.long)}${f.std ? ", " + esc(f.std) : ""}</div></div></button>`).join("")}
       <button class="btn ghost sm" data-act="chooserOff">Cancel</button></div>`
-      : `<button class="btn block" data-act="chooser">+ New</button>`}
-    ${scriptBanner()}
-    ${ready ? `<div class="warnline">${ready} job${ready === 1 ? "" : "s"} ready for your sign-off.</div>` : ""}
-    <section class="hgrp"><h3>On site</h3><div class="tiles t3">
-      <button class="tile" data-act="book"><b>Handbook</b><span>Tables, tests, calculators</span></button>
-      <button class="tile" data-act="codes"><b>Coding guide</b><span>C1 · C2 · C3 · FI</span></button>
-      <button class="tile" data-act="ask"><b>Ask the regs</b><span>AI, with reg numbers</span></button>
+      : `<div class="newrow"><button class="btn ${lj ? "ghost" : ""}" data-act="newType" data-type="EICR">+ New EICR</button><button class="btn ghost" data-act="chooser">+ Other cert</button></div>`}
+    <section class="hgrp"><h3>Your jobs${liveJobs().length ? ` <span class="count">${liveJobs().length}</span>` : ""}</h3>
+      ${liveJobs().length > 3 ? `<label class="field" for="homeq"><span class="vh">Search jobs</span><input id="homeq" type="search" data-local="homeQ" value="${esc(view.homeQ || "")}" placeholder="Search address, client or number" autocomplete="off"></label>` : ""}
+      <div id="homelist">${homeList(lj && lj.id)}</div>
+    </section>
+    <section class="hgrp"><h3>On site</h3><div class="toolchips">
+      <button data-act="book">Handbook</button><button data-act="calcs">Calculators</button><button data-act="codes">Coding guide</button><button data-act="ask">Ask the regs</button><button data-act="train">Training</button><button data-act="nvq">NVQ portfolio</button>
     </div></section>
-    <div class="card"><h2>Your jobs <span class="count">${liveJobs().length}</span></h2>
-      ${liveJobs().length > 3 ? `<label class="field" for="homeq"><span>Search</span><input id="homeq" type="search" data-local="homeQ" value="${esc(view.homeQ || "")}" placeholder="Address, client, number…" autocomplete="off"></label>` : ""}
-      <div id="homelist">${homeList()}</div>
-    </div>
-    <section class="hgrp"><h3>Business</h3><div class="tiles t3" style="grid-template-columns:repeat(${billingOk() ? 3 : 2},minmax(0,1fr))">
-      <button class="tile" data-act="customers"><b>Customers</b><span>Contacts &amp; history</span></button>
-      ${billingOk() ? `<button class="tile" data-act="money"><b>Money</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>` : ""}
-      <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} to chase</span></button>
-    </div></section>
-    <section class="hgrp"><h3>Learn</h3><div class="tiles t3" style="grid-template-columns:repeat(2,minmax(0,1fr))">
-      <button class="tile" data-act="train"><b>Training</b><span>EWA · AM2E · 2391</span></button>
-      <button class="tile" data-act="nvq"><b>NVQ portfolio</b><span>Log evidence</span></button>
-    </div></section>
-    <details class="more card exbox"${liveJobs().length < 3 ? " open" : ""}><summary>Example report</summary><div>${jobCard(EX || (EX = exampleJob()))}<div class="muted small">A filled-in EICR on a shop board, so you can see the checks working. Changes to the example aren't saved.</div></div></details>
+    <nav class="bizrow" aria-label="Business">
+      <button data-act="customers">Customers</button>
+      ${billingOk() ? `<button data-act="money">Money${owed ? ` <em>${owed} unpaid</em>` : ""}</button>` : ""}
+      <button data-act="due">Due soon${due ? ` <em>${due}</em>` : ""}</button>
+    </nav>
+    <details class="more exbox"${liveJobs().length < 3 ? " open" : ""}><summary>Example report</summary><div>${jobCard(EX || (EX = exampleJob()))}<div class="muted small">A filled-in EICR on a shop board, so you can see the checks working. Changes to the example aren't saved.</div></div></details>
   </main>`;
 }
 
@@ -2997,6 +3079,7 @@ function renderSettings(){
     <div class="card"><h2>Who uses this device</h2>
       ${field("Your name","settings.userName",{ph:"e.g. Adam Fyles"})}
       ${chips("Role","settings.role",[["Inspector","Inspector – signs off"],["Tester","Tester – sends for sign-off"]])}
+      ${chips("Screen","settings.theme",[["Dark","Dark"],["Light","Light, for bright sun"]])}
       ${settings.role === "Tester" ? field("Who signs your work off","settings.signOffName") : ""}
       <div class="muted small">${settings.role === "Tester" ? "You fill in and test. When a job is done, tap <b>Send for sign-off</b> – it syncs to " + esc(settings.signOffName || "the inspector") + ", who checks, signs and sends it to the office." : "Jobs your tester marks ready show up on your list with <b>Ready to sign</b>."}</div>
     </div>
@@ -3442,7 +3525,7 @@ function renderCircuit(){
     <button class="iconbtn" data-act="prev" aria-label="Previous circuit" ${idx <= 0 ? "disabled" : ""}>‹</button><button class="iconbtn" data-act="next" aria-label="Next circuit">${idx >= b.circuits.length - 1 ? "+" : "›"}</button></header>
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example – edits aren't saved</div>` : statusHtml()}
   <main>
-    <div class="row"><span class="muted small">Result</span><span data-derived="cpill">${DERIVED.cpill()}</span></div>
+    <div data-derived="panel">${DERIVED.panel()}</div>
     <div data-derived="prevc">${prevCard(c)}</div>
     <div class="card"><h2>Circuit</h2>
       <div class="grid2">${field("Circuit no.","circ.no")}${field("Points served","circ.pts",{num:true})}</div>
@@ -3613,6 +3696,7 @@ document.addEventListener("click", e => {
     case "chooserOff": view.chooser = false; rerender(); break;
     case "newType": { const nj = newJob(a.dataset.type); jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); break; }
     case "book": view = {screen:"book", chapter:null, calc:view.calc, bookDev:view.bookDev}; render(); break;
+    case "calcs": view = {screen:"book", chapter:"calc", calc:view.calc, bookDev:view.bookDev}; render(); break;
     case "bookHome": view.chapter = null; render(); break;
     case "chapter": view.chapter = a.dataset.id; render(); break;
     case "codes": view = {screen:"codes", codeQ:"", codeF:"All", codeFor:null}; render(); break;
@@ -3805,6 +3889,10 @@ document.addEventListener("click", e => {
     case "handoff": if (job.example) break; job.handoff = {by: me(), at: Date.now()}; markDirty(job); scheduleSync(500); rerender(); break;
     case "shareJob": downloadFile(fileName(job, "json"), jobBackup(job), "application/json"); break;
     case "open": view = {screen:"job", jobId:a.dataset.id, tab:"job", board:0, circ:null}; render(); break;
+    case "resume": { const rj = jobs.find(x => x.id === a.dataset.id); if (!rj) break; const t = typeOf(rj);
+      if (FORMS[t] || t === "PAT") { view = {screen:"job", jobId:rj.id, tab:"job", board:0, circ:null}; render(); break; }
+      const pr = jobProgress(rj), at = pr.next || null;
+      view = {screen:"job", jobId:rj.id, tab: rj.boards.some(b => b.circuits.length) ? "circuits" : "job", board: at ? at.bi : 0, circ: at ? at.c.id : null}; render(); break; }
     case "board": view.board = +a.dataset.i; view.confirmDel = null; render(); break;
     case "addBoard": if (job.example) break; job.boards.push(newBoard(job.boards.length + 1)); view.board = job.boards.length - 1; markDirty(job); render(); break;
     case "circ": view.circ = a.dataset.id; view.confirmDel = null; render(); break;
