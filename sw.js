@@ -1,7 +1,7 @@
 // BlueForge Certificates – offline cache. Bump CACHE on every release so devices pick up the new version.
-const CACHE = "bf-eicr-v29";
+const CACHE = "bf-eicr-v30";
 const SHELL = ["./", "./index.html", "./app.js", "./bf-data.js", "./bf-train.js", "./bf-forms.js", "./bf-nvq.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
-const OPTIONAL = ["./logo-blueforge.png", "./logo-inaec.png", "./logo-mark.png", "./fonts/chakra-petch-latin-600-normal.woff2", "./fonts/chakra-petch-latin-700-normal.woff2", "./fonts/manrope-latin-600-normal.woff2", "./fonts/manrope-latin-700-normal.woff2", "./fonts/barlow-latin-400-normal.woff2", "./fonts/barlow-latin-500-normal.woff2", "./fonts/barlow-latin-600-normal.woff2"];   // cached if present; a missing logo never blocks the update
+const OPTIONAL = ["./logo-blueforge.png", "./logo-inaec.png", "./logo-mark.png", "./logo-hex.png", "./logo-word.png", "./fonts/chakra-petch-latin-600-normal.woff2", "./fonts/chakra-petch-latin-700-normal.woff2", "./fonts/manrope-latin-600-normal.woff2", "./fonts/manrope-latin-700-normal.woff2", "./fonts/barlow-latin-400-normal.woff2", "./fonts/barlow-latin-500-normal.woff2", "./fonts/barlow-latin-600-normal.woff2"];   // cached if present; a missing logo never blocks the update
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, {cache: "reload"})))
     .then(() => Promise.all(OPTIONAL.map(u => fetch(new Request(u, {cache: "reload"})).then(r => r.ok ? c.put(u, r) : null).catch(() => null))))).then(() => self.skipWaiting()));

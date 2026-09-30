@@ -502,7 +502,9 @@ async function loadLogos(){
   const mk = await get("logo-mark.png"); if (!mk) LOGOS.bf = null;
   if (LOGOS.bf) document.documentElement.classList.add("has-logo");
 }
-function hideSplash(){ const sp = document.getElementById("splash"); if (!sp) return; const wait = Math.max(0, 700 - (Date.now() - (window.__bfStart || 0))); setTimeout(() => { sp.classList.add("gone"); setTimeout(() => sp.remove(), 450); }, wait); }
+function hideSplash(){ const sp = document.getElementById("splash"); if (!sp) return; window.__bfReady = true;
+  const still = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const wait = window.__bfSkip ? 0 : Math.max(0, (still ? 600 : 2300) - (Date.now() - (window.__bfStart || 0))); setTimeout(() => { sp.classList.add("gone"); setTimeout(() => sp.remove(), 450); }, wait); }
 // Company band at the top of every document. Certificates (not quotes/invoices) also carry the INAEC Independent Contractor logo.
 function band(co, cert){
   const bf = LOGOS.bf ? `<img class="lg" src="${LOGOS.bf}" alt="">` : "";
@@ -3037,11 +3039,12 @@ function homeList(skipId){
   if (!list.length) return q ? `<div class="empty">Nothing matches “${esc(view.homeQ)}”.</div>` : `<div class="muted small" style="padding:0 4px">No other jobs.</div>`;
   return `<div style="display:flex;flex-direction:column;gap:8px">${list.map(jobCard).join("")}</div>`;
 }
+
 function renderHome(){
   const ready = billingOk() ? liveJobs().filter(j => j.handoff && !j.sig).length : 0;
   const lj = liveJob(), due = dueList().length;
   const owed = billingOk() ? liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid").length : 0;
-  return `<header class="top home"><span class="hexmark" aria-hidden="true">BF</span><h1>BlueForge<span class="sub brandmark">${esc(new Date().toLocaleDateString("en-GB", {weekday:"long", day:"numeric", month:"long"}))}</span></h1><button class="iconbtn" data-act="settings" aria-label="Settings">⚙</button></header>
+  return `<header class="top home"><img class="toplogo" src="logo-mark.png" alt="BlueForge" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'hexmark',textContent:'BF'}))"><h1>BlueForge<span class="sub brandmark">${esc(new Date().toLocaleDateString("en-GB", {weekday:"long", day:"numeric", month:"long"}))}</span></h1><button class="iconbtn" data-act="settings" aria-label="Settings">⚙</button></header>
   ${statusHtml()}
   <main>
     ${scriptBanner()}
