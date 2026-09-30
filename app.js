@@ -455,7 +455,7 @@ function idbGet(k){ return new Promise(res => { if (!idb) return res(undefined);
 function idbSet(k, v){ return new Promise(res => { if (!idb) return res(false); try { const tx = idb.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(v, k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); tx.onabort = () => res(false); } catch(e){ res(false); } }); }
 function lsRead(){ try { return JSON.parse(localStorage.getItem(LS) || "{}"); } catch(e){ return {}; } }
 function snapshot(){ return JSON.parse(JSON.stringify({ settings, jobs: jobs.filter(j => !j.example) })); }
-function writeNow(){
+function writeNow(){ if (window.__bfRemoved) return;
   const snap = snapshot();
   writeChain = writeChain.then(async () => {
     let ok = await idbSet("state", snap);
@@ -465,7 +465,7 @@ function writeNow(){
   });
   return writeChain;
 }
-function lsWrite(){ clearTimeout(persistTimer); persistTimer = setTimeout(writeNow, 250); return true; }
+function lsWrite(){ if (window.__bfRemoved) return true; clearTimeout(persistTimer); persistTimer = setTimeout(writeNow, 250); return true; }
 function markDirty(job){
   if (!job || job.example) return;
   job.updated = Date.now();
@@ -524,8 +524,9 @@ const syncState = { state:"idle", err:"" };
 let syncing = false, syncTimer = null, syncAgain = false;
 function setSync(state, err){ syncState.state = state; syncState.err = err || ""; updateStatus(); }
 function scheduleSync(ms){ if (!settings.sendUrl) return; clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, ms); }
+function platformName(){ const u = navigator.userAgent; return /iPhone/.test(u) ? "iPhone" : /iPad/.test(u) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) ? "iPad" : /Android/.test(u) ? "Android" : /Windows/.test(u) ? "Windows PC" : /Mac/.test(u) ? "Mac" : "Other"; }
 async function api(action, data){
-  const res = await fetch(settings.sendUrl, { method:"POST", body: JSON.stringify({ key: settings.sendKey, action, ...data }), redirect:"follow" });
+  const res = await fetch(settings.sendUrl, { method:"POST", body: JSON.stringify({ key: settings.sendKey, action, device: settings.deviceId, deviceName: settings.userName || "", role: settings.role, platform: platformName(), owner: settings.ownerHash || "", ...data }), redirect:"follow" });
   const text = await res.text().catch(() => "");
   let o = null; try { o = JSON.parse(text); } catch(e){}
   if (!o) {
@@ -536,6 +537,7 @@ async function api(action, data){
     if (res.status === 404 || /unable to open the file|not found/.test(t)) throw new Error("that link doesn't point to a live script – use the Web app URL ending in /exec");
     throw new Error("no reply from your Google script (" + res.status + ") – check the link ends in /exec and a New version is deployed");
   }
+  if (!o.ok && o.error === "DEVICE_REMOVED") { await deviceRemoved(); throw new Error("this device has been removed"); }
   if (!o.ok) {
     const old = o.error === "Unknown action" || /Argument cannot be null|Cannot read propert|newBlob/i.test(o.error || "");
     throw new Error(old ? "your Google script is the old version – paste in the new setup script, then Deploy › Manage deployments › Edit (pencil) › Version: New version › Deploy" : (o.error || "script error"));
@@ -901,7 +903,7 @@ function sigPad(label, bind, dateBind){
 
 /* ---------------- customer handover signature (EIC / MW / PAT) */
 function handoverCard(job){
-  if (job.example || settings.role === "Tester") return "";
+  if (job.example || !billingOk()) return "";
   return `<div class="card"><h2>Customer handover</h2><div class="muted small">Optional – the customer signs to confirm they've received the ${typeOf(job) === "PAT" ? "register and been told about any failed items" : "certificate and been shown the installation"}.</div>
     <div class="grid2">${field("Customer name","job.handover.name")}${field("Date","job.handover.date",{type:"date"})}</div>
     ${sigPad("Customer signature","job.handover.sig","job.handover.date")}</div>`;
@@ -929,7 +931,7 @@ function tabDanger(){
     ${field("Date","job.danger.date",{type:"date"})}
     <div class="muted small">By signing, the customer confirms they've been told about the danger and the action taken.</div></div>
   <div class="card"><h2>Send</h2>
-    <button class="btn block" data-act="sendDanger" ${settings.sendUrl ? "" : "disabled"}>Email notice to customer and office</button>
+    ${billingOk() ? `<button class="btn block" data-act="sendDanger" ${settings.sendUrl ? "" : "disabled"}>Email notice to customer and office</button>` : `<div class="muted small">Print it and leave the signed copy with the customer – the owner emails it after checking.</div>`}
     ${settings.sendUrl ? `<div class="muted small">${d.sentAt ? "Sent " + esc(agoText(d.sentAt)) + ". " : ""}Goes to ${esc(d.email || "the customer (add their email)")} and ${esc(settings.officeEmail)}.</div>` : `<div class="muted small">Set up sync in ⚙ to email it. You can still print it below.</div>`}
     <div id="dangermsg"></div>
     <button class="btn block ghost" data-act="printDanger">Print / save as PDF</button>
@@ -1157,9 +1159,51 @@ function totalsHtml(lines){
     <div class="row"><span>Total</span><span class="spacer"></span><b style="font-size:18px">${money(t.total)}</b></div></div>`;
 }
 
+/* ---------------- billing is owner-only: unlocked per device with the owner passcode, checked by the Google script */
+const billingOk = () => settings.billingOwner === true && settings.role !== "Tester";
+async function billingHash(code){ return sha("bf-billing:" + String(code).trim()); }
+function billingCard(){
+  if (billingOk()) return `<div class="card"><h2>Owner access</h2><div class="row">${pill("pass","Owner access on")}<span class="spacer"></span><button class="btn ghost sm" data-act="billingOff">Turn off on this device</button></div><div class="muted small">Quotes, invoices, prices, bank details and emailing certificates to customers only work on devices unlocked with the owner passcode.</div></div>`;
+  return `<div class="card"><h2>Owner access</h2><div class="muted small">Quotes, invoices, prices, bank details and emailing certificates to customers are turned off on this device. ${settings.role === "Tester" ? "Testers can't use billing." : "Enter the owner passcode to unlock them here. The first time, this sets the passcode – after that, only devices that know it can see billing."}</div>
+    ${settings.role === "Tester" ? "" : `${settings.sendUrl ? "" : `<div class="warnline">Set up sync first – the passcode is checked by your Google script so it can't be bypassed on another phone.</div>`}
+    <label class="field" for="ownercode"><span>Owner passcode</span><input id="ownercode" type="password" autocomplete="off" class="num"></label>
+    <button class="btn sm" data-act="billingOn" ${settings.sendUrl ? "" : "disabled"}>Unlock owner access</button><div id="billmsg"></div>`}</div>`;
+}
+
+/* ---------------- linked devices (owner only) */
+let devList = null, devErr = "";
+async function deviceRemoved(){
+  // Removed by the owner: stop syncing and wipe everything held on this device.
+  clearTimeout(persistTimer); window.__bfRemoved = true;
+  try { if (idb) idb.close(); idb = null; } catch(e){}
+  await new Promise(r => { try { const q = indexedDB.deleteDatabase(IDB_NAME); q.onsuccess = q.onerror = q.onblocked = () => r(); setTimeout(r, 3000); } catch(e){ r(); } });
+  try { localStorage.clear(); sessionStorage.clear(); } catch(e){}
+  try { if (window.caches) for (const k of await caches.keys()) if (k.startsWith("bf-data")) await caches.delete(k); } catch(e){}
+  jobs = []; settings = {...DEFAULT_SETTINGS};
+  document.body.innerHTML = `<div style="font-family:Arial,sans-serif;padding:40px 20px;text-align:center;color:#0F1B2D"><h2>This device has been removed</h2><p>The owner has removed this device from BlueForge. Its jobs have been cleared from this device.</p><p>If that's a mistake, ask the owner to allow it back and send you a new connection code, then reload.</p><button onclick="location.reload()" style="margin-top:12px;padding:12px 20px;font-size:16px">Reload</button></div>`;
+}
+async function loadDevices(){
+  devErr = ""; devList = null; rerender();
+  try { const o = await api("devices", {}); devList = o.devices || []; } catch(e){ devErr = String(e.message || e); }
+  rerender();
+}
+function devicesCard(){
+  if (!billingOk() || !settings.sendUrl) return "";
+  const rows = (devList || []).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0)).map(d => `<div class="code-item"><div class="row"><b style="flex:1;min-width:0">${esc(d.name || "Unnamed device")}${d.id === settings.deviceId ? " (this device)" : ""}</b>${d.revoked ? pill("fail","Removed") : d.owner ? pill("pass","Owner") : pill("none", d.role || "Device")}</div>
+    <div class="small muted">${esc(d.platform || "")} · last synced ${esc(agoText(d.lastSeen))}</div>
+    ${d.id === settings.deviceId ? "" : d.revoked ? `<button class="btn ghost sm" data-act="devAllow" data-id="${esc(d.id)}">Allow back</button>` : view.confirmDel === "dev:" + d.id ? `<div class="row"><span class="small">Remove this device? It stops syncing and its jobs are wiped from it next time it connects.</span><button class="btn danger sm" data-act="devRemove" data-id="${esc(d.id)}">Remove</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="dev:${esc(d.id)}">Remove</button>`}</div>`).join("");
+  return `<div class="card"><h2>Linked devices</h2><div class="muted small">Every phone and PC connected to your BlueForge sync. Remove one if it's lost, sold, or someone leaves.</div>
+    ${devList === null && !devErr ? `<button class="btn ghost sm" data-act="devLoad">Show linked devices</button>` : ""}
+    ${devErr ? `<div class="errline">${esc(devErr)}</div>` : ""}
+    ${devList ? (rows || `<div class="muted small">No devices yet.</div>`) + `<button class="btn ghost sm" data-act="devLoad">Refresh</button>` : ""}
+    <details class="more"${view.confirmDel === "rotate" ? " open" : ""}><summary>Change the connection code</summary><div>
+      <div class="muted small">Makes every other device's code stop working – use it if a removed device might still have the old code. You'll then need to re-connect your other devices (e.g. your PC) with the new code shown under <b>Connect another device</b>.</div>
+      ${view.confirmDel === "rotate" ? `<div class="row"><button class="btn danger sm" data-act="rotateKey">Yes, change it</button><button class="btn ghost sm" data-act="cancelDel">Cancel</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="rotate">Change connection code</button>`}<div id="rotmsg"></div></div></details></div>`;
+}
+
 /* ---------------- quotes (EICR remedials) */
 function quoteCard(job){
-  if (typeOf(job) !== "EICR" || job.example) return "";
+  if (typeOf(job) !== "EICR" || job.example || !billingOk()) return "";
   const q = job.quote;
   const n = job.obs.filter(o => ["C1","C2","FI"].includes(o.code)).length;
   if (!q) return n ? `<div class="card"><h2>Remedial quote</h2><div class="muted small">Turn the ${n} C1/C2/FI item${n === 1 ? "" : "s"} into a priced quote for the customer.</div><button class="btn sm" data-act="makeQuote">Create quote</button></div>` : "";
@@ -1244,7 +1288,7 @@ function quoteToJob(job, type){
 
 /* ---------------- invoices (any job) */
 function invoiceCard(job){
-  if (job.example || settings.role === "Tester") return "";
+  if (job.example || !billingOk()) return "";
   const v = job.invoice;
   if (!v) return `<div class="card"><h2>Invoice</h2><div class="muted small">Raise an invoice for this job${job.fromQuote ? ` – lines come from quote ${esc(job.fromQuote.number || "")}` : ""}.</div><button class="btn sm" data-act="makeInvoice">Create invoice</button></div>`;
   return `<div class="card"><h2>Invoice <span class="count">${esc(v.number || "")}</span></h2><div class="row">${pill(v.status === "Paid" ? "pass" : "check", v.status === "Paid" ? "Paid" : "Unpaid")}<b>${money(totals(v.lines).total)}</b><span class="spacer"></span><button class="btn sm" data-act="openInvoice">Open invoice</button></div></div>`;
@@ -1293,7 +1337,7 @@ function renderMoney(){
 
 /* ---------------- customer copy of the certificate (per job, off unless ticked) */
 function customerCopyBlock(job){
-  if (job.example || settings.role === "Tester") return "";
+  if (job.example || !billingOk()) return "";
   return `${chips("Also email this " + (typeOf(job) === "EICR" ? "report" : typeOf(job) === "PAT" ? "register" : "certificate") + " to the customer","job.emailCustomer",["Yes","No"],{small:true})}
     ${job.emailCustomer === "Yes" ? field("Customer email","job.client.email",{type:"email",hint: job.client.email ? "" : "Needed to send the customer a copy"}) : ""}
     ${job.customerSentAt ? `<div class="muted small">Customer copy sent ${esc(agoText(job.customerSentAt))}.</div>` : ""}`;
@@ -1407,7 +1451,7 @@ async function processQueue(){
   for (const job of queue){
     try {
       if (job.sendQueued) { await sendJob(job); job.sendQueued = false; job.sentAt = Date.now(); }
-      if (job.customerPending) { await sendCustomerCopy(job); job.customerPending = false; }
+      if (job.customerPending && billingOk()) { await sendCustomerCopy(job); job.customerPending = false; }
       job.sendError = ""; job.updated = Date.now();
     }
     catch(e){ job.sendError = String(e.message || e); }
@@ -1431,7 +1475,7 @@ async function finishAndSend(){
   job.finishedAt = Date.now();
   const auto = settings.sendUrl && settings.autoSend !== "No";
   if (auto) { job.sendQueued = true; job.sendError = ""; job.sendDevice = settings.deviceId; }
-  job.customerPending = !!(settings.sendUrl && job.emailCustomer === "Yes" && job.client && job.client.email);
+  job.customerPending = !!(billingOk() && settings.sendUrl && job.emailCustomer === "Yes" && job.client && job.client.email);
   if (job.customerPending) job.sendDevice = settings.deviceId;
   if (job.emailCustomer === "Yes" && !settings.sendUrl) toast("Sync isn't set up, so the customer copy can't be emailed – forward it from your email app.");
   if (!job.issueDate) job.issueDate = today();
@@ -1475,7 +1519,24 @@ var FOLDER_ID = "";
 function doPost(e) {
   try {
     var d = JSON.parse(e.postData.contents);
-    if (d.key !== KEY) return reply({ok: false, error: "Wrong key – reconnect this device"});
+    var P = PropertiesService.getScriptProperties();
+    if (d.key !== (P.getProperty("key") || KEY)) return reply({ok: false, error: "Wrong key – reconnect this device"});
+    var devs = JSON.parse(P.getProperty("devices") || "{}"), isOwner = !!d.owner && d.owner === P.getProperty("ownerHash");
+    if (d.device) {
+      var dv = devs[d.device] || {};
+      if (dv.revoked) return reply({ok: false, error: "DEVICE_REMOVED"});
+      var nm = d.deviceName || dv.name || "", rl = d.role || dv.role || "", pf = d.platform || dv.platform || "";
+      if (!dv.lastSeen || Date.now() - dv.lastSeen > 600000 || dv.name !== nm || dv.role !== rl || dv.platform !== pf || !!dv.owner !== isOwner) {
+        devs[d.device] = {name: nm, role: rl, platform: pf, lastSeen: Date.now(), owner: isOwner};
+        P.setProperty("devices", JSON.stringify(devs));
+      }
+    }
+    if (d.action === "devices" || d.action === "revokeDevice" || d.action === "restoreDevice" || d.action === "rotateKey") {
+      if (!isOwner) return reply({ok: false, error: "Only the owner can manage devices"});
+      if (d.action === "devices") { var list = []; for (var k in devs) { var x = devs[k]; x.id = k; list.push(x); } return reply({ok: true, devices: list}); }
+      if (d.action === "revokeDevice" || d.action === "restoreDevice") { if (devs[d.id]) { devs[d.id].revoked = d.action === "revokeDevice"; P.setProperty("devices", JSON.stringify(devs)); } return reply({ok: true}); }
+      if (d.action === "rotateKey") { if (!/^bf-[a-z0-9]{12,}$/.test(d.newKey || "")) return reply({ok: false, error: "Bad key"}); P.setProperty("key", d.newKey); return reply({ok: true}); }
+    }
     var action = d.action || (d.test ? "test" : (d.reportHtml ? "send" : ""));
     if (action === "test") {
       MailApp.sendEmail({to: d.to || OFFICE, subject: "BlueForge EICR – test email", htmlBody: "<p>The BlueForge app is connected. Reports will be emailed here and saved in the " + FOLDER_NAME + " folder in Google Drive.</p>", name: "BlueForge EICR"});
@@ -1506,6 +1567,13 @@ function doPost(e) {
       var data2 = sub_("Data"), out = [];
       (d.ids || []).forEach(function (id) { var f = file_(data2, id + ".json"); if (f) out.push(JSON.parse(f.getBlob().getDataAsString())); });
       return reply({ok: true, jobs: out});
+    }
+    if (action === "owner") {
+      var op = PropertiesService.getScriptProperties(), have = op.getProperty("ownerHash");
+      if (!d.hash) return reply({ok: false, error: "No passcode"});
+      if (!have) { op.setProperty("ownerHash", d.hash); return reply({ok: true, created: true}); }
+      if (have !== d.hash) { Utilities.sleep(1500); return reply({ok: false, error: "Wrong passcode"}); }
+      return reply({ok: true});
     }
     if (action === "nextNumber") {
       var lk = LockService.getScriptLock(); lk.waitLock(25000);
@@ -1665,7 +1733,7 @@ function render(){
   else if (view.screen === "book") html = renderBook();
   else if (view.screen === "codes") html = renderCodes();
   else if (view.screen === "due") html = renderDue();
-  else if (view.screen === "money") html = renderMoney();
+  else if (view.screen === "money") html = billingOk() ? renderMoney() : renderHome();
   else if (view.screen === "job") { if (curJob() && !curJob().deleted) html = renderJob(); else { view = {screen:"home", tab:"job", board:0, circ:null}; html = renderHome(); } }
   app.innerHTML = html;
   renderTabs();
@@ -1678,7 +1746,7 @@ function rerender(){ view.keepScroll = true; render(); }
 
 function jobPill(j){
   const s = jobSummary(j), t = typeOf(j);
-  if (j.handoff && !j.sig && settings.role !== "Tester") return pill("check","Ready to sign");
+  if (j.handoff && !j.sig && billingOk()) return pill("check","Ready to sign");
   if (t === "PAT") return s.total ? pill(s.pat.fail ? "fail" : s.status === "pass" ? "pass" : "none", `${s.pat.pass} pass · ${s.pat.fail} fail`) : pill("none","In progress");
   if (t === "EICR") return s.status === "fail" ? pill("fail","UNSATISFACTORY") : s.status === "pass" && s.tested ? pill("pass","SATISFACTORY") : pill("none","In progress");
   return s.status === "fail" ? pill("fail","TEST FAILURES") : s.status === "pass" ? pill("pass","ALL PASSED") : pill("none","In progress");
@@ -1700,7 +1768,7 @@ function homeList(){
   return `<div style="display:flex;flex-direction:column;gap:8px">${list.map(jobCard).join("")}</div>`;
 }
 function renderHome(){
-  const ready = settings.role !== "Tester" ? liveJobs().filter(j => j.handoff && !j.sig).length : 0;
+  const ready = billingOk() ? liveJobs().filter(j => j.handoff && !j.sig).length : 0;
   return `<header class="top"><h1>BlueForge<span class="sub brandmark">CERTIFICATES &amp; REPORTS</span></h1><button class="iconbtn" data-act="settings" aria-label="Settings">⚙</button></header>
   ${statusHtml()}
   <main>
@@ -1714,7 +1782,7 @@ function renderHome(){
     <div class="tiles">
       <button class="tile" data-act="book"><b>Handbook</b><span>Tables, test methods, calculators</span></button>
       <button class="tile" data-act="codes"><b>Coding guide</b><span>Search C1 · C2 · C3 · FI</span></button>
-      <button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>
+      ${billingOk() ? "" : "<!--"}<button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>${billingOk() ? "" : "-->"}
       <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} re-inspection${dueList().length === 1 ? "" : "s"} to chase</span></button>
     </div>
     ${ready ? `<div class="warnline">${ready} job${ready === 1 ? "" : "s"} ready for your sign-off.</div>` : ""}
@@ -1776,7 +1844,9 @@ function renderSettings(){
       <div class="grid2">${field("Certificate number prefix","settings.numPrefix",{ph:"BF",hint:"Numbers look like BF-EICR-2026-001"})}${field("Breaker width for labels","settings.labelModuleMm",{num:true,unit:"mm",ph:"18"})}</div>
     </div>
     ${lockCard()}
-    <div class="card"><h2>Prices</h2><div class="muted small">Used to price remedial quotes and invoices. These are examples – change them to your own.</div>
+    ${billingCard()}
+    ${devicesCard()}
+    ${billingOk() ? `<div class="card"><h2>Prices</h2><div class="muted small">Used to price remedial quotes and invoices. These are examples – change them to your own.</div>
       ${priceList().map((p, i) => `<div class="row" style="align-items:flex-end;flex-wrap:nowrap">${field("Item", "settings.prices." + i + ".desc")}<div style="width:110px;flex:none">${field("Price", "settings.prices." + i + ".price", {num:true, unit:"£"})}</div><button class="btn ghost sm" data-act="delPrice" data-i="${i}" aria-label="Remove">✕</button></div>`).join("")}
       <button class="btn ghost sm" data-act="addPrice">+ Add price</button></div>
     <div class="card"><h2>Invoicing</h2>
@@ -1785,7 +1855,7 @@ function renderSettings(){
       ${field("Payment terms","settings.payTerms",{num:true,unit:"days",ph:"14"})}
       ${field("Bank account name","settings.bankName")}
       <div class="grid2">${field("Sort code","settings.sortCode",{ph:"00-00-00"})}${field("Account number","settings.accountNo",{num:true})}</div>
-      <div class="muted small">Printed on invoices. Kept on this device only – each device needs them entered.</div></div>
+      <div class="muted small">Printed on invoices. Kept on this device only.</div></div>` : ""}
     <div class="card"><h2>Test instruments</h2><div class="muted small">Filled in automatically on each new board.</div>
       ${field("Multifunction tester (make / serial)","settings.mft")}${field("Insulation resistance tester serial","settings.irSerial",{ph:"e.g. As MFT"})}
       ${field("Continuity / loop / RCD tester serial","settings.loopSerial",{ph:"e.g. As MFT"})}${field("Earth electrode tester serial","settings.elecSerial")}
@@ -1809,14 +1879,14 @@ const TABS = {
 function renderJob(){
   const job = curJob();
   const t = typeOf(job);
-  if (!TABS[t].some(x => x[0] === view.tab) && !(["danger","quote"].includes(view.tab) && t === "EICR") && view.tab !== "invoice") view.tab = "job";
+  if (!TABS[t].some(x => x[0] === view.tab) && !(view.tab === "danger" && t === "EICR") && !(view.tab === "quote" && t === "EICR" && billingOk()) && !(view.tab === "invoice" && billingOk())) view.tab = "job";
   if (view.tab === "circuits" && curCirc()) return renderCircuit();
   if (view.tab === "pat" && view.patItem && job.pat && job.pat.items.some(x => x.id === view.patItem)) return renderPatItem();
   loadJobPhotos(job);
   const body = { job: t === "EICR" ? tabJob : t === "PAT" ? patWorkTab : tabWork, supply:tabSupply, circuits:tabCircuits, inspect:tabInspect, photos:tabPhotos, report:tabReport, cert:tabCert, pat:tabPat, danger:tabDanger, quote:tabQuote, invoice:tabInvoice }[view.tab]() + (view.tab === "job" && !job.example ? prevJobsCard(job) : "");
   return `<header class="top"><button class="iconbtn" data-act="home" aria-label="All jobs">←</button><h1>${esc(jobTitle(job) === "Untitled job" ? "New " + TYPES[t] : jobTitle(job))}<span class="sub">${job.example ? "Example – not saved" : esc(TYPES[t]) + (job.reportNo ? " · " + esc(job.reportNo) : "")}</span></h1></header>
   ${job.example ? `<div class="status warn"><span class="dot"></span>Example report – edits aren't saved</div>` : statusHtml()}
-  ${job.handoff && !job.sig && settings.role !== "Tester" && view.tab === "job" ? `<main style="padding-bottom:0"><div class="warnline">Tested by ${esc(job.handoff.by)} and sent for sign-off ${esc(agoText(job.handoff.at))}. Check it through, then sign on the ${t === "EICR" ? "Report" : "Certify"} tab.</div></main>` : ""}
+  ${job.handoff && !job.sig && billingOk() && view.tab === "job" ? `<main style="padding-bottom:0"><div class="warnline">Tested by ${esc(job.handoff.by)} and sent for sign-off ${esc(agoText(job.handoff.at))}. Check it through, then sign on the ${t === "EICR" ? "Report" : "Certify"} tab.</div></main>` : ""}
   <main>${body}</main>`;
 }
 
@@ -1860,7 +1930,7 @@ function tabWork(){
 
 /* ---------------- EIC / Minor Works: certify tab */
 function signBlock(job){
-  if (settings.role === "Tester") return `<div class="card"><h2>Sign-off</h2><div class="muted">This will be signed by <b>${esc(job.inspector || settings.signOffName)}</b>. When everything is filled in and tested, send it for sign-off below.</div></div>`;
+  if (!billingOk()) return `<div class="card"><h2>Sign-off</h2><div class="muted">This will be checked and signed by <b>${esc(settings.role === "Tester" ? (job.inspector || settings.signOffName) : settings.signOffName || "the owner")}</b>. When everything is filled in and tested, send it for sign-off below.${settings.role !== "Tester" ? " (This device doesn't have owner access – unlock it in ⚙ to sign here.)" : ""}</div></div>`;
   return sigPad("Signature", "job.sig", "job.sigDate");
 }
 function tabCert(){
@@ -1872,9 +1942,9 @@ function tabCert(){
     if (ps.fail) probs.push(`<div class="errline">${ps.fail} item${ps.fail === 1 ? "" : "s"} failed – label and withdraw from use.</div>`);
     return `<div class="banner ${ps.fail ? "fail" : s.status === "pass" ? "pass" : "none"}"><span class="small">PAT register</span><strong>${ps.pass} PASS · ${ps.fail} FAIL</strong><span class="small">${ps.total} item${ps.total === 1 ? "" : "s"}</span></div>
     ${probs.length ? `<div class="card"><h2>To sort out</h2>${probs.join("")}</div>` : ""}
-    <div class="card"><h2>Declaration</h2><div class="grid2">${field("Tested by","job.inspector")}${field("Position","job.position")}</div>${settings.role === "Tester" ? "" : signBlock(job)}
+    <div class="card"><h2>Declaration</h2><div class="grid2">${field("Tested by","job.inspector")}${field("Position","job.position")}</div>${!billingOk() ? "" : signBlock(job)}
       <div class="grid2">${field("Date signed","job.sigDate",{type:"date"})}${field("Date of issue","job.issueDate",{type:"date"})}</div></div>
-    ${settings.role === "Tester" ? signBlock(job) : ""}${handoverCard(job)}${finishCard(job)}`;
+    ${!billingOk() ? signBlock(job) : ""}${handoverCard(job)}${finishCard(job)}`;
   }
   const problems = [];
   s.fails.forEach(f => problems.push(`<div class="errline">${esc(f.b.ref)} circuit ${esc(f.c.no)} (${esc(f.c.desc || "no description")}) has failed a test.</div>`));
@@ -1888,7 +1958,7 @@ function tabCert(){
     : s.status === "pass" ? `<div class="banner pass"><span class="small">Test results</span><strong>ALL PASSED</strong><span class="small">Ready to sign.</span></div>`
     : `<div class="banner none"><span class="small">Test results</span><strong>In progress</strong><span class="small">${s.incomplete.length ? "Some results still need checking or filling in." : "Fill in the circuit test results."}</span></div>`;
   const decl = t === "EIC" ? `
-    ${settings.role === "Tester" ? "" : chips("Designed, constructed, inspected and tested by the same person","job.work.sameSigner",["Yes","No"])}
+    ${!billingOk() ? "" : chips("Designed, constructed, inspected and tested by the same person","job.work.sameSigner",["Yes","No"])}
     ${w.sameSigner === "No" ? `<div class="grid2">${field("Designer","job.work.designer")}${field("Design date","job.work.designDate",{type:"date"})}</div><div class="grid2">${field("Constructor","job.work.constructor")}${field("Construction date","job.work.constructDate",{type:"date"})}</div>` : ""}
     <div class="grid2">${field(w.sameSigner === "No" ? "Inspected and tested by" : "Name","job.inspector")}${field("Position","job.position")}</div>` :
     `<div class="grid2">${field("Name","job.inspector")}${field("Position","job.position")}</div>`;
@@ -1898,10 +1968,10 @@ function tabCert(){
     <div class="grid2">${autoBox("Max interval for premises","maxInt")}${field("Your interval (optional)","job.recInterval",{num:true,unit:"yrs"})}</div>
     ${autoBox("Recommended first inspection by","nextDue")}</div>` : ""}
   <div class="card"><h2>Declaration</h2>${decl}
-    ${settings.role === "Tester" ? "" : signBlock(job)}
+    ${!billingOk() ? "" : signBlock(job)}
     <div class="grid2">${field("Date signed","job.sigDate",{type:"date"})}${field("Date of issue","job.issueDate",{type:"date"})}</div>
   </div>
-  ${settings.role === "Tester" ? signBlock(job) : ""}
+  ${!billingOk() ? signBlock(job) : ""}
   ${handoverCard(job)}
   ${finishCard(job)}`;
 }
@@ -1910,7 +1980,7 @@ function tabCert(){
 function finishCard(job){
   const t = typeOf(job), noun = t === "EICR" ? "report" : "certificate";
   if (job.example) return `<div class="card"><h2>Finished ${noun}</h2><button class="btn block ghost" data-act="print">Print / save as PDF</button></div>`;
-  const tester = settings.role === "Tester";
+  const tester = !billingOk();
   const main = tester
     ? `<button class="btn block" data-act="handoff">${job.handoff ? "Send for sign-off again" : "Send for sign-off"}</button>
        <div class="muted small">${job.handoff ? `Sent ${esc(agoText(job.handoff.at))}. ` : ""}${settings.sendUrl ? `It syncs to ${esc(job.inspector || settings.signOffName)} automatically when you have signal.` : "Sync isn't set up on this phone – set it up in ⚙ so the job reaches the inspector, or use Share job file below."}</div>
@@ -1927,12 +1997,13 @@ function finishCard(job){
        ${job.sendError && job.sendQueued ? `<div class="warnline">Not sent yet: ${esc(job.sendError)}. It will keep trying.</div>` : ""}
        `;
   return `<div class="card"><h2>Finished ${noun}</h2>${customerCopyBlock(job)}${main}
+    ${!billingOk() ? `<div class="muted small">Only the owner can sign, finish, print or send ${noun}s.</div></div>` + "<!--" : ""}
     <button class="btn block ghost" data-act="print">Print / save as PDF</button>
     <div class="muted small">${IOS ? `Shows the full ${noun}. Tap <b>Print / PDF</b>, then Share › <b>Save to Files</b> for a PDF. <b>Back to app</b> returns here.` : `Opens the full ${noun} laid out for A4. In the print screen choose <b>Save as PDF</b>.`}</div>
     <button class="btn block ghost" data-act="export">Download ${noun} file</button><div id="exportmsg"></div>
-  </div>
+  </div>${!billingOk() ? "-->" : ""}
   ${invoiceCard(job)}
-  <div class="card"><h2>Delete</h2>${view.confirmDel === "job" ? `<div class="row"><span class="small">Delete this whole ${noun} from every synced device? This can't be undone.</span><button class="btn danger sm" data-act="delJob">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="job">Delete this ${noun}</button>`}</div>`;
+  ${!billingOk() ? "" : `<div class="card"><h2>Delete</h2>${view.confirmDel === "job" ? `<div class="row"><span class="small">Delete this whole ${noun} from every synced device? This can't be undone.</span><button class="btn danger sm" data-act="delJob">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="job">Delete this ${noun}</button>`}</div>`}`;
 }
 
 /* ---------------- handbook */
@@ -2176,10 +2247,10 @@ function tabReport(){
     ${autoBox("Next inspection due by","nextDue")}</div>
   <div class="card"><h2>Declaration</h2>
     <div class="grid2">${field("Inspected and tested by","job.inspector")}${field("Position","job.position")}</div>
-    ${settings.role === "Tester" ? "" : signBlock(job)}
+    ${!billingOk() ? "" : signBlock(job)}
     <div class="grid2">${field("Date signed","job.sigDate",{type:"date"})}${field("Date of issue","job.issueDate",{type:"date"})}</div>
     ${field("Reviewed / authorised by","job.reviewer")}</div>
-  ${settings.role === "Tester" ? signBlock(job) : ""}
+  ${!billingOk() ? signBlock(job) : ""}
   ${finishCard(job)}`;
 }
 
@@ -2226,7 +2297,7 @@ document.addEventListener("input", e => {
   let path = rest.join(".");
   setPath(obj, path, el.value);
   if (root === "job" && path === "reportNo") obj.numPending = false;
-  if (root === "settings" && (path === "sendUrl" || path === "sendKey")) scheduleSync(1500);
+  if (root === "settings" && (path === "sendUrl" || path === "sendKey")) { scheduleSync(1500); settings.billingOwner = false; }
   if (path.includes(".lines.")) { const q = j(); const qt = document.getElementById("qtot"), it = document.getElementById("itot"); if (qt && q.quote) qt.innerHTML = totalsHtml(q.quote.lines); if (it && q.invoice) it.innerHTML = totalsHtml(q.invoice.lines); }
   if (root === "settings") flush();
   else markDirty(j());
@@ -2274,7 +2345,18 @@ document.addEventListener("click", e => {
       jb.updated = Date.now(); lsWrite(); scheduleSync(6000);
       view = {screen:"job", jobId:cf.jobId, tab:cf.tab, board:0, circ:null}; render(); break; }
     case "syncNow": syncNow(); break;
-    case "money": view = {screen:"money"}; render(); break;
+    case "money": if (billingOk()) { view = {screen:"money"}; render(); } break;
+    case "billingOn": (async () => { const m = document.getElementById("billmsg"), code = document.getElementById("ownercode").value;
+      if (String(code).trim().length < 4) { m.innerHTML = `<div class="warnline">Use at least 4 characters.</div>`; return; }
+      try { const h = await billingHash(code); const o = await api("owner", { hash: h }); settings.billingOwner = true; settings.ownerHash = h; lsWrite(); rerender(); toast(o.created ? "Owner passcode set – owner access unlocked on this device" : "Owner access unlocked on this device"); }
+      catch(err){ m.innerHTML = `<div class="errline">${esc(/wrong/i.test(err.message) ? "That passcode isn't right." : err.message)}</div>`; } })(); break;
+    case "devLoad": loadDevices(); break;
+    case "devRemove": (async () => { view.confirmDel = null; try { await api("revokeDevice", { id: a.dataset.id }); toast("Device removed"); } catch(err){ toast(String(err.message || err)); } loadDevices(); })(); break;
+    case "devAllow": (async () => { try { await api("restoreDevice", { id: a.dataset.id }); toast("Device allowed back – send it the connection code"); } catch(err){ toast(String(err.message || err)); } loadDevices(); })(); break;
+    case "rotateKey": (async () => { view.confirmDel = null; const nk = "bf-" + Array.from(crypto.getRandomValues(new Uint8Array(18)), x => "abcdefghijklmnopqrstuvwxyz0123456789"[x % 36]).join("");
+      try { await api("rotateKey", { newKey: nk }); settings.sendKey = nk; lsWrite(); rerender(); toast("Connection code changed – re-connect your other devices with the new code"); }
+      catch(err){ const m = document.getElementById("rotmsg"); if (m) m.innerHTML = `<div class="errline">${esc(err.message || err)}</div>`; } })(); break;
+    case "billingOff": settings.billingOwner = false; settings.ownerHash = ""; lsWrite(); rerender(); break;
     case "makeQuote": makeQuote(job, false).then(() => { view.tab = "quote"; render(); }); break;
     case "openQuote": view.tab = "quote"; render(); break;
     case "addC3": makeQuote(job, true).then(rerender); break;
@@ -2311,7 +2393,7 @@ document.addEventListener("click", e => {
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, () => toast(t)); else toast(t); break; }
     case "openDanger": view.tab = "danger"; render(); break;
     case "backToReport": view.tab = "report"; render(); break;
-    case "sendDanger": sendDanger(); break;
+    case "sendDanger": if (billingOk()) sendDanger(); break;
     case "printDanger": printHtml(dangerHtml(job), "danger"); break;
     case "clearSigPath": { const [rt, ...rs] = a.dataset.path.split("."); setPath(roots()[rt], rs.join("."), ""); markDirty(job); rerender(); break; }
     case "due": view = {screen:"due"}; render(); break;
@@ -2332,7 +2414,11 @@ document.addEventListener("click", e => {
     case "reload": (async () => { if (persistTimer) { clearTimeout(persistTimer); await writeNow(); } location.reload(); })(); break;
     case "copyCode": { const t = document.getElementById("conncode"); if (!t) break; const ok = () => { const m = document.getElementById("sendmsg"); a.textContent = "Copied"; };
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t.value).then(ok, () => { t.focus(); t.select(); }); else { t.focus(); t.select(); } break; }
-    case "join": { const m = document.getElementById("joinmsg"); try { applyConnectionCode(document.getElementById("joincode").value); if (m) m.innerHTML = `<div class="muted small">Connected. Syncing now…</div>`; syncNow().then(() => rerender()); } catch(err){ if (m) m.innerHTML = `<div class="errline">${esc(err.message)}</div>`; } break; }
+    case "join": { const m = document.getElementById("joinmsg"); try { applyConnectionCode(document.getElementById("joincode").value); if (m) m.innerHTML = `<div class="muted small">Checking…</div>`;
+      api("test", {}).then(() => { const m2 = document.getElementById("joinmsg"); if (m2) m2.innerHTML = `<div class="muted small">Connected. Syncing now…</div>`; syncNow().then(() => rerender()); })
+        .catch(err => { const m2 = document.getElementById("joinmsg"); const offline = navigator.onLine === false || /Failed to fetch|NetworkError/i.test(String(err.message));
+          if (m2) m2.innerHTML = offline ? `<div class="muted small">Saved – couldn't reach Google to check it just now (no signal?). It will keep trying and sync when it can.</div>` : `<div class="errline">${esc(/wrong key/i.test(err.message) ? "That code doesn't work any more – ask the owner for the current connection code." : err.message)}</div>`; });
+    } catch(err){ if (m) m.innerHTML = `<div class="errline">${esc(err.message)}</div>`; } break; }
     case "handoff": if (job.example) break; job.handoff = {by: me(), at: Date.now()}; markDirty(job); scheduleSync(500); rerender(); break;
     case "shareJob": downloadFile(fileName(job, "json"), jobBackup(job), "application/json"); break;
     case "open": view = {screen:"job", jobId:a.dataset.id, tab:"job", board:0, circ:null}; render(); break;
@@ -2352,7 +2438,7 @@ document.addEventListener("click", e => {
     case "delCirc": { const b = curBoard(); b.circuits = b.circuits.filter(c => c.id !== view.circ); view.circ = null; view.confirmDel = null; markDirty(job); render(); break; }
     case "delBoard": job.boards.splice(Math.min(view.board, job.boards.length-1), 1); view.board = 0; view.confirmDel = null; markDirty(job); render(); break;
     case "delObs": job.obs = job.obs.filter(o => o.id !== a.dataset.id); view.confirmDel = null; markDirty(job); rerender(); break;
-    case "delJob": { const i = jobs.findIndex(x => x.id === job.id);
+    case "delJob": { if (!billingOk()) break; const i = jobs.findIndex(x => x.id === job.id);
       allPhotoIds(job).forEach(id => { photoDel(id); photoCache.delete(id); });
       if (i >= 0) jobs[i] = normaliseJob({id: job.id, type: job.type, deleted: true, updated: Date.now(), client:{}, boards:[], obs:[], insp:{}, supply:{}});
       lsWrite(); scheduleSync(1000);
@@ -2362,9 +2448,9 @@ document.addEventListener("click", e => {
     case "obsFromFail": { const b = job.boards.find(x => x.id === a.dataset.b); const c = b && b.circuits.find(x => x.id === a.dataset.c); if (c) obsFromCircuit(b, c); rerender(); break; }
     case "allOk": { const sec = inspSecs(job).find(s => s[0] === a.dataset.sec); sec[2].forEach(([id]) => { const k = id.replace(".","_"); if (!job.insp[k]) job.insp[k] = "✓"; }); markDirty(job); rerender(); break; }
     case "clearSig": job.sig = ""; markDirty(job); rerender(); break;
-    case "export": exportReport(); break;
-    case "print": printReport(); break;
-    case "finish": finishAndSend(); break;
+    case "export": if (billingOk()) exportReport(); break;
+    case "print": if (billingOk() || job.example) printReport(); break;
+    case "finish": if (billingOk()) finishAndSend(); break;
     case "testSend": (async () => { const m = document.getElementById("sendmsg"); if (!settings.sendUrl) { if (m) m.innerHTML = `<div class="warnline">Paste the sync link first.</div>`; return; } if (m) m.innerHTML = `<div class="muted small">Sending…</div>`;
       try { await api("test", {to: settings.officeEmail}); syncNow();
         if (m) m.innerHTML = `<div class="muted small">Test email sent to ${esc(settings.officeEmail)}.</div>`; }
