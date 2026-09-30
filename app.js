@@ -1355,6 +1355,21 @@ function readBoardCard(job, b){
     <label class="btn ghost sm" for="rb-gal-${esc(b.id)}">Gallery</label><input type="file" id="rb-gal-${esc(b.id)}" data-readboard="${esc(b.id)}" accept="image/*" hidden></div>
     <div id="rbmsg-${esc(b.id)}"></div></div>`;
 }
+function incomerSide(devs){
+  const real = devs.map((d, i) => [d, i]).filter(([d]) => d.kind !== "blank"); if (!real.length) return "left";
+  const first = real[0][0], last = real[real.length - 1][0];
+  const ms = devs.findIndex(d => d.kind === "ms");
+  if (ms >= 0) return ms > (devs.length - 1) / 2 ? "right" : "left";
+  if (last.kind === "rcd" && first.kind !== "rcd") return "right";
+  return "left";
+}
+function reverseBoard(job, b){
+  const n = b.circuits.length;
+  b.circuits.reverse(); b.circuits.forEach((c, i) => c.no = String(i + 1));
+  if (Array.isArray(b.labExtras)) { b.labExtras.forEach(e => e.pos = n - Math.max(0, Math.min(n, Math.round(num(e.pos) ?? 0)))); b.labExtras.reverse(); }
+  b.labDir = b.labDir === "rtl" ? "ltr" : "rtl";
+  markDirty(job);
+}
 const RB_KINDS = [["mcb","MCB"],["rcbo","RCBO"],["rcd","RCD"],["ms","Main switch"],["spd","SPD"],["fuse","Fuse"],["afdd","AFDD"],["blank","Blank / spare"],["other","Other"]];
 async function readBoardFromFile(boardId, file){
   const job = j(), b = job && job.boards.find(x => x.id === boardId); if (!b) return;
@@ -1374,7 +1389,11 @@ async function readBoardFromFile(boardId, file){
       rating: d.rating == null ? "" : String(d.rating), ma: d.ma == null ? "" : String(d.ma), rcdType: RCD_TYPES.includes(d.rcdType) ? d.rcdType : "",
       poles: d.poles || 1, label: String(d.label || "").trim(), conf: ["high","medium","low"].includes(d.confidence) ? d.confidence : "medium", use: d.kind !== "blank" }));
     if (!devs.length) { say(`<div class="errline">No devices found – try a closer, straighter photo with the cover off.</div>`); return; }
-    view.read = { boardId, devs, notes: String((o.board && o.board.notes) || ""), mode: b.circuits.some(x => x.desc || x.dev) ? "update" : "new" };
+    // Circuits are numbered from the main switch (or main RCD) outwards – if that's on the right of the photo, count right to left.
+    const side = incomerSide(devs);
+    if (side === "right") devs.reverse();
+    b.labDir = side === "right" ? "rtl" : "ltr";
+    view.read = { boardId, devs, side, notes: String((o.board && o.board.notes) || ""), mode: b.circuits.some(x => x.desc || x.dev) ? "update" : "new" };
     view.tab = "readboard"; view.circ = null; render();
   } catch(e){ say(`<div class="errline">${esc(e.message || e)}</div>`); }
 }
@@ -1392,7 +1411,8 @@ function tabReadBoard(){
   </div>`).join("");
   const nC = r.devs.filter(d => d.use && ["mcb","rcbo","fuse","other"].includes(d.kind)).length;
   return `<div class="card"><h2>Check the board – ${esc(b.ref || "Board")}</h2>
-    <div class="muted small">Read from your photo, left to right. Fix anything that's wrong, untick anything that shouldn't be there. Ratings you're not sure of are marked – check them against the devices.</div>
+    <div class="field"><span>Numbered from the main switch – it's on the</span><div class="chips">${[["left","Left"],["right","Right"]].map(([k, l]) => `<button type="button" class="chip" data-act="rbSide" data-v="${k}" aria-pressed="${r.side === k}">${l}</button>`).join("")}</div></div>
+    <div class="muted small">Way 1 is next to the main switch. Fix anything that's wrong, untick anything that shouldn't be there. Ratings you're not sure of are marked – check them against the devices.</div>
     ${r.notes ? `<div class="warnline small">${esc(r.notes)}</div>` : ""}
     ${b.circuits.length ? `<div class="field"><span>This board already has ${b.circuits.length} circuit${b.circuits.length === 1 ? "" : "s"}</span><div class="chips">${[["update","Update them in order (keeps your readings)"],["new","Add as extra circuits"]].map(([k, l]) => `<button type="button" class="chip" data-act="rbMode" data-v="${k}" aria-pressed="${r.mode === k}">${l}</button>`).join("")}</div></div>` : ""}
   </div>
@@ -2445,13 +2465,13 @@ function tabCircuits(){
     <div class="grid2">${field("DB reference","board.ref")}${field("Location","board.location")}</div>
     <div class="grid2">${field("Zdb at this board","board.zdb",{num:true,unit:"Ω",ph:num(job.supply.ze) !== null ? job.supply.ze : "= Ze"})}${field("Ipf at this board","board.ipf",{num:true,unit:"kA",ph:num(job.supply.ipf) !== null ? job.supply.ipf : "= Ipf"})}</div>
     <div class="hint small muted" data-derived="zdbHint">${DERIVED.zdbHint()}</div>
-    <details class="more"><summary>Supply to board, SPD and instruments</summary><div>
+    <details class="more"${view.confirmDel === "rev" || view.confirmDel === "board" ? " open" : ""}><summary>Supply to board, SPD and instruments</summary><div>
       <div class="grid2">${field("Supplied from","board.from")}${field("Distribution OCPD","board.ocpd",{ph:"BS / rating"})}</div>
       ${chips("Phases","board.phases",["1","3"])}${field("SPD type / status","board.spd")}
       <div class="grid2">${chips("Polarity confirmed","board.polarity",["✓","✗"])}${chips("Phase sequence","board.seq",["✓","✗","N/A"],{small:true})}</div>
       <div class="grid2">${field("Tested by","board.testedBy")}${field("Date tested","board.date",{type:"date"})}</div>
       ${field("Multifunction tester","board.mft")}<div class="grid2">${field("IR tester","board.irSerial")}${field("Loop / RCD tester","board.loopSerial")}</div>${field("Earth electrode tester","board.elecSerial")}
-      ${job.example ? "" : `<div class="row"><button class="btn ghost sm" data-act="chart">Circuit chart</button><button class="btn ghost sm" data-act="labels">Labels</button>${typeOf(job) === "MW" ? "" : `<button class="btn ghost sm" data-act="dupBoard">Duplicate board</button>`}</div>`}
+      ${job.example ? "" : `<div class="row"><button class="btn ghost sm" data-act="chart">Circuit chart</button><button class="btn ghost sm" data-act="labels">Labels</button>${b.circuits.length > 1 ? (view.confirmDel === "rev" ? `<button class="btn sm" data-act="revBoard">Yes, reverse numbering</button>` : `<button class="btn ghost sm" data-act="askDel" data-what="rev">Reverse circuit numbering</button>`) : ""}${typeOf(job) === "MW" ? "" : `<button class="btn ghost sm" data-act="dupBoard">Duplicate board</button>`}</div>`}
       ${job.boards.length > 1 && !job.example ? (view.confirmDel === "board" ? `<div class="row"><span class="small">Delete this board and its ${b.circuits.length} circuits?</span><button class="btn danger sm" data-act="delBoard">Delete</button><button class="btn ghost sm" data-act="cancelDel">Keep</button></div>` : `<button class="btn danger sm" data-act="askDel" data-what="board">Delete board</button>`) : ""}
     </div></details>
   </div>
@@ -2699,6 +2719,8 @@ document.addEventListener("click", e => {
     case "rbType": { const d = view.read.devs[+a.dataset.i]; d.rcdType = d.rcdType === a.dataset.v ? "" : a.dataset.v; rerender(); break; }
     case "rbApply": applyBoardRead(); break;
     case "rbMode": view.read.mode = a.dataset.v; rerender(); break;
+    case "rbSide": { const r = view.read; if (r.side !== a.dataset.v) { r.devs.reverse(); r.side = a.dataset.v; const bb = j().boards.find(x => x.id === r.boardId); if (bb) bb.labDir = r.side === "right" ? "rtl" : "ltr"; } rerender(); break; }
+    case "revBoard": { reverseBoard(job, curBoard()); view.confirmDel = null; rerender(); toast("Circuit numbers reversed – circuit 1 is now at the other end"); break; }
     case "rbCancel": view.read = null; view.tab = "circuits"; render(); break;
     case "aiSave": (async () => { const k = (document.getElementById("aikey") || {}).value || ""; const m = document.getElementById("aimsg");
       try { await api("setAiKey", { aiKey: k.trim() }); settings.aiReady = true; lsWrite(); rerender(); toast("AI key saved to your Google script"); }
