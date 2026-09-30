@@ -3411,7 +3411,7 @@ function renderBook(){
     <button class="card-link" data-act="chapter" data-id="calc"><div class="grow"><div class="t">Calculators</div><div class="d">Volt drop · adiabatic · max Zs · R1+R2 · PFC · rings · TT · IR · It · max demand · Ohm's law</div></div></button>
     ${BF_BOOK.filter(b => !b.g).map(b => `<button class="card-link" data-act="chapter" data-id="${b.id}"><div class="grow"><div class="t">${esc(b.t)}</div></div></button>`).join("")}
     ${[...new Set(BF_BOOK.filter(b => b.g).map(b => b.g))].map(g => `<section class="hgrp"><h3>${esc(g)}</h3>${BF_BOOK.filter(b => b.g === g).map(b => `<button class="card-link" data-act="chapter" data-id="${b.id}"><div class="grow"><div class="t">${esc(b.t)}</div></div></button>`).join("")}</section>`).join("")}</main>`;
-  const body = view.chapter === "calc" ? calcHtml() : `<div class="card book">${ch.h.replace("{{ZS_TABLE}}", zsTableHtml()).replace("{{RES_TABLE}}", resTableHtml())}</div>`;
+  const body = view.chapter === "calc" ? calcHtml() : `<div class="card book">${ch.h.replace("{{ZS_TABLE}}", zsTableHtml()).replace("{{RES_TABLE}}", resTableHtml()).replace(/\{\{WIRING:(\w)\}\}/g, (m, pl) => window.BF_WIRING ? BF_WIRING(pl, view.wireSel, view.wireZoom) : "")}</div>`;
   return `<header class="top"><button class="iconbtn" data-act="bookHome" aria-label="Back to contents">←</button><h1>${esc(ch ? ch.t : "Calculators")}<span class="sub">Handbook</span></h1></header><main>${body}</main>`;
 }
 
@@ -3702,7 +3702,9 @@ document.addEventListener("click", e => {
     case "book": view = {screen:"book", chapter:null, calc:view.calc, bookDev:view.bookDev}; render(); break;
     case "calcs": view = {screen:"book", chapter:"calc", calc:view.calc, bookDev:view.bookDev}; render(); break;
     case "bookHome": view.chapter = null; render(); break;
-    case "chapter": view.chapter = a.dataset.id; render(); break;
+    case "chapter": view.chapter = a.dataset.id; view.wireSel = null; view.wireZoom = false; render(); break;
+    case "wireSel": view.wireSel = a.dataset.dev ? (view.wireSel === a.dataset.dev && a.tagName.toLowerCase() === "g" ? null : a.dataset.dev) : null; rerender(); break;
+    case "wireZoom": view.wireZoom = !view.wireZoom; rerender(); break;
     case "codes": view = {screen:"codes", codeQ:"", codeF:"All", codeFor:null}; render(); break;
     case "codesFor": view = {screen:"codes", codeQ:"", codeF:"All", codeFor:{jobId: job.id, target: a.dataset.target, tab: view.tab}}; render(); break;
     case "codesBack": { const cf = view.codeFor; view = {screen:"job", jobId:cf.jobId, tab:cf.tab, board:0, circ:null}; render(); break; }
