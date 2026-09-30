@@ -1582,7 +1582,7 @@ function renderTrain(){
   const st = topicStats(), t = tr(), seen = Object.keys(t.s).length, tot = allQ().length;
   const rr = Object.values(t.s).reduce((a, r) => [a[0] + r.r, a[1] + r.r + r.w], [0, 0]), acc = rr[1] ? Math.round(rr[0] / rr[1] * 100) : null;
   const due = dueIds().length, weak = weakIds().length;
-  const am = window.BF_AM2E, amTot = am ? am.sections.reduce((n, s) => n + s.items.length, 0) : 0, amDone = Object.values(t.am2e).filter(Boolean).length;
+  const am = window.BF_AM2E, amTot = am ? am.sections.reduce((n, s) => n + s.items.length, 0) : 0, amDone = Object.entries(t.am2e).filter(([k, v]) => v && !k.startsWith("am2:")).length;
   const areas = {}; Object.entries(st).forEach(([k, o]) => (areas[o.area] = areas[o.area] || []).push([k, o]));
   const bar = o => { const p = o.r + o.w ? Math.round(o.r / (o.r + o.w) * 100) : null; return `<div class="tbar"><i style="width:${p ?? 0}%;background:${p === null ? "transparent" : p >= 80 ? "var(--pass)" : p >= 60 ? "var(--check)" : "var(--fail)"}"></i></div><span class="small muted">${o.seen}/${o.n}${p === null ? "" : " · " + p + "%"}</span>`; };
   return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Training<span class="sub">EWA · AM2E · 2391</span></h1></header>
@@ -1594,7 +1594,7 @@ function renderTrain(){
         <button class="tile" data-act="trCalc"><b>Calculations</b><span>15 by hand – pen and paper</span></button>
         <button class="tile" data-act="trWeak" ${weak ? "" : "disabled"}><b>Weak spots (${weak})</b><span>Ones you last got wrong</span></button>
         <button class="tile" data-act="trMock"><b>Mock exam</b><span>40 questions · 60 min · marked at the end</span></button>
-        <button class="tile" data-act="am2e"><b>AM2E checklist</b><span>${amDone}/${amTot} ticked off</span></button>
+        <button class="tile" data-act="am2e"><b>AM2E / AM2</b><span>Checklists & practical lessons · ${amDone}/${amTot} ticked</span></button>
       </div></div>
     ${Object.entries(areas).map(([area, list]) => `<div class="card"><h2>${esc(area)}</h2>${list.sort((a, b) => a[0].localeCompare(b[0])).map(([k, o]) => { const L = lessonFor(k); return `<div class="trrow"><button class="card-link trtopic" data-act="${L ? "lesson" : "trTopic"}" data-t="${esc(k)}"><div class="grow"><div class="t">${esc(k)}</div>${bar(o)}${L ? `<span class="small ${t.read[L.id] ? "okc" : "muted"}">${t.read[L.id] ? "✓ Lesson read" : "📖 Lesson · " + L.mins + " min"}</span>` : ""}</div></button><button class="btn ghost sm trq" data-act="trTopic" data-t="${esc(k)}" aria-label="Practise ${esc(k)}">Quiz</button></div>`; }).join("")}</div>`).join("")}
     <div class="card"><h2>Make more questions (AI)</h2><div class="muted small">The AI writes fresh questions on any topic, with full working. They're marked "AI – not checked": treat them as extra practice, not gospel. Needs signal.</div>
@@ -1648,14 +1648,16 @@ function renderQuizEnd(){
   </main>`;
 }
 function renderAm2e(){
-  const m = window.BF_AM2E, t = tr();
+  const which = view.which === "am2" ? "am2" : "am2e", m = which === "am2" ? window.BF_AM2 : window.BF_AM2E, t = tr(), pre = which === "am2" ? "am2:" : "";
   if (!m) return `<header class="top"><button class="iconbtn" data-act="train">←</button><h1>AM2E checklist</h1></header><main><div class="card">Not loaded.</div></main>`;
-  return `<header class="top"><button class="iconbtn" data-act="train" aria-label="Back">←</button><h1>AM2E checklist<span class="sub">Can I do this? Tick it off.</span></h1></header>
+  return `<header class="top"><button class="iconbtn" data-act="train" aria-label="Back">←</button><h1>${which === "am2" ? "AM2 / AM2S checklist" : "AM2E checklist"}<span class="sub">Can I do this? Tick it off.</span></h1></header>
   <main>
     ${m.note ? `<div class="warnline small">${esc(m.note)}</div>` : ""}
-    ${m.sections.map(s => { const done = s.items.filter((_, i) => t.am2e[s.id + ":" + i]).length; return `<div class="card"><h2>${esc(s.title)} <span class="count">${done}/${s.items.length}</span></h2>
+    <div class="chips" style="margin:0 0 10px">${[["am2e","AM2E (experienced worker)"],["am2","AM2 / AM2S (apprentice)"]].map(([k, l]) => `<button class="chip" data-act="am2which" data-v="${k}" aria-pressed="${which === k}">${l}</button>`).join("")}</div>
+    <button class="card-link" data-act="trPractical"><div class="grow"><div class="t">Practical lessons</div><div class="d">Safe isolation · installation · motors · lighting & heating · testing · fault finding · the day</div></div></button>
+    ${m.sections.map(s => { const done = s.items.filter((_, i) => t.am2e[pre + s.id + ":" + i]).length; return `<div class="card"><h2>${esc(s.title)} <span class="count">${done}/${s.items.length}</span></h2>
       <div class="muted small">${s.time ? `<b>${esc(s.time)}</b> · ` : ""}${esc(s.what || "")}</div>
-      ${s.items.map((it, i) => `<label class="amitem"><input type="checkbox" data-am2e="${esc(s.id + ":" + i)}" ${t.am2e[s.id + ":" + i] ? "checked" : ""}><span>${esc(it)}</span></label>`).join("")}
+      ${s.items.map((it, i) => `<label class="amitem"><input type="checkbox" data-am2e="${esc(pre + s.id + ":" + i)}" ${t.am2e[pre + s.id + ":" + i] ? "checked" : ""}><span>${esc(it)}</span></label>`).join("")}
       ${s.fails && s.fails.length ? `<details class="more"><summary>Common fail points</summary><div><ul class="small">${s.fails.map(f => `<li>${esc(f)}</li>`).join("")}</ul></div></details>` : ""}</div>`; }).join("")}
     <div class="card"><h2>On the day</h2><ul class="small">${m.tips.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>
     <div class="card"><h2>Sources</h2><div class="small">${m.sources.map(x => `<div><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a></div>`).join("")}</div><div class="muted small">Checked ${esc(m.updated || "")}. NET change details – confirm yours with your centre.</div></div>
@@ -3244,7 +3246,9 @@ document.addEventListener("click", e => {
     case "cust": view = {screen:"customer", custKey: a.dataset.k}; render(); break;
     case "custNew": { const c = customers().find(x => x.key === view.custKey); const nj = newJob(a.dataset.type); if (c) { nj.client = Object.assign(nj.client || {}, { name: c.name, phone: c.phone, email: c.email, address: (c.jobs[0].client && c.jobs[0].client.address) || "" }); nj.address = c.jobs.slice().sort((x, y) => String(y.inspDate).localeCompare(String(x.inspDate)))[0].address || ""; }
       jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); break; }
-    case "am2e": view = {screen:"am2e"}; render(); break;
+    case "am2e": view = {screen:"am2e", which: view.which}; render(); break;
+    case "am2which": view.which = a.dataset.v; render(); break;
+    case "trPractical": view = {screen:"train", scrollTo:"Practical (AM2 / AM2E)"}; render(); { const h = [...document.querySelectorAll(".card h2")].find(x => x.textContent.startsWith("Practical")); if (h) h.scrollIntoView(); } break;
     case "trQuick": startQuiz("practice", pickQuick(10), "Quick 10"); break;
     case "trCards": startQuiz("practice", dueIds().slice(0, 20), "Revise"); break;
     case "trWeak": startQuiz("practice", shuffle(weakIds()).slice(0, 20), "Weak spots"); break;
