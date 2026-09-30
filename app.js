@@ -250,7 +250,7 @@ function jobSummary(job){
   let nextDue = "";
   if (interval && job.inspDate){ const d = new Date(job.inspDate + "T12:00:00"); d.setMonth(d.getMonth() + Math.round(interval*12)); nextDue = d.toISOString().slice(0,10); }
   const type = typeOf(job);
-  if (FORMS[type]) { const fs = formSummary(job); const nd = (job.form && job.form.nextDue) || fs.nextDue; return { counts, fails: [], unwrittenFails: [], coded: [], inspFails: [], incomplete: [], tested: fs.rows, total: fs.rows, untested: 0, unsat: fs.outcome === "Unsatisfactory", started: fs.rows + fs.checksDone, years: null, interval: null, nextDue: nd, status: fs.outcome === "Unsatisfactory" ? "fail" : fs.outcome ? "pass" : "none", form: fs }; }
+  if (FORMS[type]) { const fs = formSummary(job); const nd = (job.form && job.form.nextDue) || fs.nextDue; return { counts, fails: [], unwrittenFails: [], coded: [], inspFails: [], incomplete: [], tested: fs.rows, total: fs.rows, untested: 0, unsat: formBad(FORMS[type], fs.outcome), started: fs.rows + fs.checksDone, years: null, interval: null, nextDue: nd, status: formBad(FORMS[type], fs.outcome) ? "fail" : fs.outcome && fs.outcome !== "Draft" ? "pass" : "none", form: fs }; }
   if (type === "PAT") { const ps = patSummary(job); return { counts, fails: [], unwrittenFails: [], coded: [], inspFails: [], incomplete: [], tested: ps.pass + ps.fail, total: ps.total, untested: ps.none + ps.check, unsat: false, started: ps.total, years: null, interval: null, nextDue: "", status: ps.status, pat: ps }; }
   if (type !== "EICR") {
     const inspFails = inspFlat(job).filter(([id]) => job.insp[id.replace(".","_")] === "✗");
@@ -1359,6 +1359,8 @@ function billingCard(){
 /* ---------------- form certificates: fire alarm, emergency lighting, EV charge point, solar PV (driven by bf-forms.js) */
 const FORMS = window.BF_FORMS || {};
 const isForm = job => !!FORMS[typeOf(job)];
+const formOutcomes = F => F.outcomes || ["Satisfactory","Unsatisfactory"];
+const formBad = (F, o) => !F.outcomes && o === "Unsatisfactory";
 function formInit(job){ const f = job.form = job.form || {}; f.v = f.v || {}; f.chk = f.chk || {}; f.rows = f.rows || {}; f.roles = f.roles || []; return f; }
 function formFieldFail(fd, val, job){
   const n = num(val); if (n === null) return "";
@@ -1373,7 +1375,8 @@ function formSummary(job){
   F.checks.forEach(c => c.items.forEach(([id, l]) => { checksTot++; const v = f.chk[c.id + "_" + id]; if (v) checksDone++; if (v === "✗") { fails++; probs.push(l); } }));
   F.tables.forEach(t => (f.rows[t.id] || []).forEach((r, i) => { rows++; t.cols.forEach(c => { const w = formFieldFail(c, r[c.k], job); if (w) { fails++; probs.push(`${t.row} ${r.ref || r.loc || i + 1} – ${c.label}: ${w}`); } }); if (r.res === "✗") { fails++; probs.push(`${t.row} ${r.ref || r.loc || i + 1} failed`); } }));
   let nextDue = f.v.next || f.v.nexta || "";
-  if (!nextDue && F.intervalMonths && job.inspDate) { const d = new Date(job.inspDate + "T12:00:00"); d.setMonth(d.getMonth() + F.intervalMonths); nextDue = d.toISOString().slice(0, 10); }
+  if (!F.intervalMonths && !F.sections.some(s => s.fields.some(fd => fd.k === "next" || fd.k === "nexta"))) nextDue = "";
+  else if (!nextDue && F.intervalMonths && job.inspDate) { const d = new Date(job.inspDate + "T12:00:00"); d.setMonth(d.getMonth() + F.intervalMonths); nextDue = d.toISOString().slice(0, 10); }
   return { fails, rows, checksDone, checksTot, probs, nextDue, outcome: f.outcome || "" };
 }
 function formFieldHtml(fd, bind, job, val){
@@ -1391,6 +1394,23 @@ function formFrom(src){
   F.tables.forEach(t => { if (t.cols.some(c => c.t === "date")) return; f.rows[t.id] = (sf.rows[t.id] || []).map(r => { const n = {}; t.cols.forEach(c => { if (c.t === "text" || (c.t === "chips" && c.k !== "res")) n[c.k] = r[c.k]; }); return n; }); });
   return nj;
 }
+async function formAi(){
+  const job = j(), f = formInit(job), m = document.getElementById("formaimsg");
+  const what = [f.v.title, f.v.scope].filter(Boolean).join(" – ");
+  if (!what) { if (m) m.innerHTML = `<div class="errline">Fill in the work being carried out (and ideally the scope) first.</div>`; return; }
+  if (!settings.sendUrl) { if (m) m.innerHTML = `<div class="errline">Set up sync first – the AI works through your Google script.</div>`; return; }
+  if (m) m.innerHTML = `<div class="muted small"><span class="pulse"></span> Drafting… (20–40 seconds)</div>`;
+  const system = "You write practical RAMS (risk assessment and method statement) content for a small UK electrical contractor in Wales. Follow EAWR 1989, GS38 safe isolation, HSE guidance and BS 7671 practice. Be specific to the job, concise and realistic. Reply with JSON only.";
+  const question = `Job: ${what}. Premises occupied: ${f.v.occupied || "unknown"}. Return {"steps":"numbered method statement, one step per line (8-15 steps)","hazards":[{"haz":"hazard","who":"Operatives|Occupants|Public|All","l":"1-5","s":"1-5","ctrl":"control measures","res":"Low|Medium|High"}]} with 6-12 hazards specific to this job.`;
+  try {
+    const o = await api("ask", { question, system, maxTokens: 3000 });
+    const mm = String(o.answer || "").match(/\{[\s\S]*\}/); if (!mm) throw new Error("The AI didn't send a draft back – try again.");
+    const d = JSON.parse(mm[0]); const rows = f.rows.haz = f.rows.haz || [];
+    if (d.steps && !String(f.v.steps || "").trim()) f.v.steps = String(d.steps);
+    let added = 0; (d.hazards || []).forEach(h => { if (h && h.haz && !rows.some(r => r.haz === h.haz)) { rows.push({ haz: String(h.haz), who: ["Operatives","Occupants","Public","All"].includes(h.who) ? h.who : "All", l: String(h.l || ""), s: String(h.s || ""), ctrl: String(h.ctrl || ""), res: ["Low","Medium","High"].includes(h.res) ? h.res : "" }); added++; } });
+    markDirty(job); rerender(); toast(`Draft added – ${added} hazard${added === 1 ? "" : "s"}. Check every line before issuing.`);
+  } catch(err){ const m2 = document.getElementById("formaimsg"); if (m2) m2.innerHTML = `<div class="errline">${esc(/Unknown action/i.test(err.message) ? "Your Google script needs updating – paste in the new script and redeploy." : err.message)}</div>`; }
+}
 function updateFormHint(el){
   const job = j(); if (!job || !isForm(job)) return;
   const F = FORMS[typeOf(job)], p = el.dataset.bind.split("."); let fd = null;
@@ -1405,13 +1425,14 @@ function updateFormHint(el){
 }
 function formSiteTab(){
   const job = j(), F = FORMS[typeOf(job)];
-  return `<div class="card"><h2>${esc(F.name)}</h2><div class="muted small">${esc(F.intro || "")}</div><div class="grid2">${field("Certificate number","job.reportNo")}${field("Date","job.inspDate",{type:"date"})}</div></div>
+  return `<div class="card"><h2>${esc(F.name)}</h2><div class="muted small">${esc(F.intro || "")}</div><div class="grid2">${field(F.noun === "document" ? "Reference" : "Certificate number","job.reportNo")}${field("Date","job.inspDate",{type:"date"})}</div></div>
   <div class="card"><h2>Client &amp; site</h2>${field("Client","job.client.name")}<div class="grid2">${field("Telephone","job.client.phone",{type:"tel"})}${field("Email","job.client.email",{type:"email"})}</div>${field("Site address","job.address",{area:true})}</div>
-  <div class="card"><h2>Instruments</h2>${field("Test instruments (make / serial)","job.form.v._inst",{ph: settings.mft || ""})}</div>`;
+  ${F.noun === "document" ? "" : `<div class="card"><h2>Instruments</h2>${field("Test instruments (make / serial)","job.form.v._inst",{ph: settings.mft || ""})}</div>`}`;
 }
 function formDetailsTab(){
   const job = j(), F = FORMS[typeOf(job)], f = formInit(job);
-  return F.sections.map(s => `<div class="card"><h2>${esc(s.title)}</h2>${s.fields.map(fd => formFieldHtml(fd, "job.form.v." + fd.k, job, f.v[fd.k])).join("")}</div>`).join("");
+  const ai = F.ai ? `<div class="card"><h2>Draft with AI</h2><div class="muted small">Fill in the work and scope below, then let the AI suggest the method statement and the hazards for this job. You check and edit everything before issuing. Needs signal.</div><button class="btn sm" data-act="formAi">Draft method &amp; hazards</button><div id="formaimsg"></div></div>` : "";
+  return ai + F.sections.map(s => `<div class="card"><h2>${esc(s.title)}</h2>${s.fields.map(fd => formFieldHtml(fd, "job.form.v." + fd.k, job, f.v[fd.k])).join("")}</div>`).join("");
 }
 function formChecksTab(){
   const job = j(), F = FORMS[typeOf(job)], f = formInit(job);
@@ -1422,8 +1443,10 @@ function formChecksTab(){
 }
 function formRowSummary(t, r, i, job){
   const bad = t.cols.some(c => formFieldFail(c, r[c.k], job)) || r.res === "✗";
+  const risk = num(r.l) && num(r.s) ? num(r.l) * num(r.s) : null;
+  if (t.presets || risk !== null) return `<b>${esc(String(i + 1))}</b> ${esc(String(r.haz || r.name || "New " + t.row.toLowerCase()).slice(0, 60))} ${risk !== null ? pill(risk >= 15 ? "fail" : risk >= 8 ? "check" : "pass", "Risk " + risk) : ""} ${r.res ? pill(r.res === "High" ? "fail" : r.res === "Medium" ? "check" : "pass", r.res) : ""}`;
   const bits = t.cols.filter(c => c.t !== "date" && r[c.k] && c.k !== "res").slice(0, 3).map(c => r[c.k]);
-  return `<b>${esc(r.ref || String(i + 1))}</b> ${esc(bits.filter(x => x !== r.ref).join(" · ").slice(0, 70) || "New " + t.row.toLowerCase())} ${bad ? pill("fail","FAIL") : r.res === "✓" ? pill("pass","PASS") : ""}`;
+  return `<b>${esc(r.ref || r.name || String(i + 1))}</b> ${esc(bits.filter(x => x !== r.ref).join(" · ").slice(0, 70) || "New " + t.row.toLowerCase())} ${bad ? pill("fail","FAIL") : r.res === "✓" ? pill("pass","PASS") : ""}`;
 }
 function formSchedTab(){
   const job = j(), F = FORMS[typeOf(job)], f = formInit(job);
@@ -1432,18 +1455,19 @@ function formSchedTab(){
       ${rows.map((r, i) => `<details class="frow"${view.frowOpen === t.id + ":" + i ? " open" : ""} data-frow="${esc(t.id + ":" + i)}"><summary>${formRowSummary(t, r, i, job)}</summary><div>
         ${t.cols.map(c => formFieldHtml(c, `job.form.rows.${t.id}.${i}.${c.k}`, job, r[c.k])).join("")}
         <div class="row"><button class="btn ghost sm" data-act="frowDup" data-t="${esc(t.id)}" data-i="${i}">Copy to a new ${esc(t.row.toLowerCase())}</button><span class="spacer"></span><button class="btn ghost sm" data-act="frowDel" data-t="${esc(t.id)}" data-i="${i}">Remove</button></div></div></details>`).join("")}
-      <button class="btn block" data-act="frowAdd" data-t="${esc(t.id)}">+ Add ${esc(t.row.toLowerCase())}</button></div>`; }).join("");
+      <div class="row"><button class="btn" data-act="frowAdd" data-t="${esc(t.id)}">+ Add ${esc(t.row.toLowerCase())}</button>${t.presets ? `<button class="btn ghost" data-act="presetOpen" data-t="${esc(t.id)}">Common ${esc(t.row.toLowerCase())}s</button>` : ""}</div>
+      ${t.presets && view.presetOpen === t.id ? `<div class="presets">${t.presets.map((p, k) => { const have = rows.some(r => r.haz === p.haz); return `<button class="card-link" data-act="frowPreset" data-t="${esc(t.id)}" data-i="${k}" ${have ? "disabled" : ""}><div class="grow"><div class="t" style="white-space:normal">${esc(p.haz)}</div><div class="d">${esc(p.ctrl.slice(0, 90))}…</div></div><span class="pill ${have ? "pass" : "none"}">${have ? "Added" : "+ Add"}</span></button>`; }).join("")}</div>` : ""}</div>`; }).join("");
 }
 function formCertTab(){
   const job = j(), F = FORMS[typeOf(job)], f = formInit(job), s = formSummary(job);
-  return `<div class="banner ${f.outcome === "Unsatisfactory" ? "fail" : f.outcome ? "pass" : "none"}"><span class="small">${esc(F.name)}</span><strong>${esc(f.outcome ? f.outcome.toUpperCase() : "Result not set")}</strong><span class="small">${s.rows} ${esc(F.tables[0] ? F.tables[0].row.toLowerCase() + (s.rows === 1 ? "" : "s") : "")} · ${s.checksDone}/${s.checksTot} checks</span></div>
+  return `<div class="banner ${formBad(F, f.outcome) ? "fail" : f.outcome ? "pass" : "none"}"><span class="small">${esc(F.name)}</span><strong>${esc(f.outcome ? f.outcome.toUpperCase() : (F.resultLabel || "Result") + " not set")}</strong><span class="small">${s.rows} ${esc(F.tables[0] ? F.tables[0].row.toLowerCase() + (s.rows === 1 ? "" : "s") : "")} · ${s.checksDone}/${s.checksTot} checks</span></div>
     ${s.probs.length ? `<div class="card"><h2>Problems found (${s.probs.length})</h2>${s.probs.slice(0, 12).map(p => `<div class="errline small">${esc(p)}</div>`).join("")}${s.probs.length > 12 ? `<div class="small muted">…and ${s.probs.length - 12} more</div>` : ""}</div>` : ""}
-    <div class="card"><h2>Result &amp; next visit</h2>
+    <div class="card"><h2>${F.intervalMonths ? "Result &amp; next visit" : esc(F.resultLabel || "Result")}</h2>
       <div class="field"><span>This certificate covers</span><div class="chips">${F.declare.roles.map(r => `<button type="button" class="chip small" data-act="formRole" data-r="${esc(r)}" aria-pressed="${f.roles.includes(r)}">${esc(r)}</button>`).join("")}</div></div>
-      ${chips("Overall result","job.form.outcome",["Satisfactory","Unsatisfactory"])}
+      ${chips(F.resultLabel || "Overall result","job.form.outcome",formOutcomes(F))}
       ${s.fails && f.outcome === "Satisfactory" ? `<div class="warnline">${s.fails} problem${s.fails === 1 ? "" : "s"} recorded – make sure they're covered as variations or put right before marking satisfactory.</div>` : ""}
-      <div class="muted small">${esc(F.interval || "")}</div>
-      <div class="grid2">${field("Next inspection / service due","job.form.nextDue",{type:"date", hint: s.nextDue && !f.nextDue ? "Suggested " + ukDate(s.nextDue) : ""})}${field("Date of issue","job.issueDate",{type:"date"})}</div></div>
+      ${F.interval ? `<div class="muted small">${esc(F.interval)}</div>` : ""}
+      <div class="grid2">${F.intervalMonths ? field("Next inspection / service due","job.form.nextDue",{type:"date", hint: s.nextDue && !f.nextDue ? "Suggested " + ukDate(s.nextDue) : ""}) : ""}${field("Date of issue","job.issueDate",{type:"date"})}</div></div>
     <div class="card"><h2>Declaration</h2><div class="small">${esc(F.declare.text)}</div><div class="grid2">${field("Name","job.inspector")}${field("Position","job.position")}</div>${!billingOk() ? "" : signBlock(job)}
       <div class="grid2">${field("Date signed","job.sigDate",{type:"date"})}</div></div>
     ${!billingOk() ? signBlock(job) : ""}${handoverCard(job)}${finishCard(job)}`;
@@ -1456,18 +1480,60 @@ function exportForm(job){
     return `<h2>${esc(sec.title)}</h2>${kv(p)}${areas.map(fd => `<table class="kv"><tbody><tr><th>${esc(fd.label)}</th><td>${val(fd, f.v[fd.k])}</td></tr></tbody></table>`).join("")}`; }).join("");
   const chks = F.checks.map(c => `<h2>${esc(c.title)}</h2><table class="insp"><tbody>${c.items.map(([id, l]) => `<tr><td>${esc(l)}</td><td class="c">${esc(f.chk[c.id + "_" + id] || "")}</td></tr>`).join("")}</tbody></table>`).join("");
   const tabs = F.tables.map(t => { const rows = f.rows[t.id] || []; if (!rows.length) return "";
-    return `<section class="wide"><h2>${esc(t.title)}</h2><table class="sched"><thead><tr><th>#</th>${t.cols.map(c => `<th>${esc(c.label)}${c.unit ? " (" + esc(c.unit) + ")" : ""}</th>`).join("")}</tr></thead><tbody>${rows.map((r, i) => `<tr class="${t.cols.some(c => formFieldFail(c, r[c.k], job)) || r.res === "✗" ? "fail" : ""}"><td>${i + 1}</td>${t.cols.map(c => `<td>${val(c, r[c.k])}</td>`).join("")}</tr>`).join("")}</tbody></table></section>`; }).join("");
+    const risk = t.cols.some(c => c.k === "l") && t.cols.some(c => c.k === "s");
+    return `<section class="wide"><h2>${esc(t.title)}</h2><table class="sched"><thead><tr><th>#</th>${t.cols.map(c => `<th>${esc(c.label)}${c.unit ? " (" + esc(c.unit) + ")" : ""}</th>`).join("")}${risk ? "<th>Risk (L×S)</th>" : ""}</tr></thead><tbody>${rows.map((r, i) => `<tr class="${t.cols.some(c => formFieldFail(c, r[c.k], job)) || r.res === "✗" ? "fail" : ""}"><td>${i + 1}</td>${t.cols.map(c => `<td>${val(c, r[c.k])}</td>`).join("")}${risk ? `<td><b>${num(r.l) && num(r.s) ? num(r.l) * num(r.s) : ""}</b></td>` : ""}</tr>`).join("")}</tbody></table>${risk ? `<p class="note">Risk = likelihood × severity (1–5 each): 1–7 low, 8–14 medium, 15–25 high – before controls. Residual risk is after the control measures.</p>` : ""}</section>`; }).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(F.long)} – ${esc(jobTitle(job))}</title><style>${REPORT_CSS}</style></head><body>
 ${band(co, true)}
 <div class="sub">${esc(F.long)} – ${esc(F.std || "")}</div>
-${kv([["Certificate number", esc(job.reportNo)], ["Date", esc(ukDate(job.inspDate))], ["Client", esc(job.client.name || "")], ["Site", esc(job.address || "").replace(/\n/g, "<br>")], ["Contractor", esc(co.company || "")], ["Instruments", esc(f.v._inst || "")]])}
-<div class="big ${f.outcome === "Unsatisfactory" ? "fail" : f.outcome ? "pass" : ""}">${esc(f.outcome ? "Overall: " + f.outcome.toUpperCase() : "Overall result not recorded")}</div>
+${kv([[F.noun === "document" ? "Reference" : "Certificate number", esc(job.reportNo)], ["Date", esc(ukDate(job.inspDate))], ["Client", esc(job.client.name || "")], ["Site", esc(job.address || "").replace(/\n/g, "<br>")], ["Contractor", esc(co.company || "")], ...(F.noun === "document" ? [] : [["Instruments", esc(f.v._inst || "")]])])}
+<div class="big ${formBad(F, f.outcome) ? "fail" : f.outcome ? "pass" : ""}">${esc(f.outcome ? (F.resultLabel || "Overall") + ": " + f.outcome.toUpperCase() : (F.resultLabel || "Overall result") + " not recorded")}</div>
 ${secs}${chks}${tabs}
 <h2>Declaration</h2><p class="note">${esc(F.declare.text)}</p>
-${kv([["Covers", esc(f.roles.join(", ") || "–")], ["Next inspection / service due", esc(ukDate(f.nextDue || s.nextDue))], ["Name", esc(job.inspector || "")], ["Position", esc(job.position || "")], ["Signature", job.sig ? `<img src="${job.sig}" alt="" style="max-height:60px">` : ""], ["Date signed", esc(ukDate(job.sigDate))]])}
+${kv([["Covers", esc(f.roles.join(", ") || "–")], ...(F.intervalMonths ? [["Next inspection / service due", esc(ukDate(f.nextDue || s.nextDue))]] : []), ["Name", esc(job.inspector || "")], ["Position", esc(job.position || "")], ["Signature", job.sig ? `<img src="${job.sig}" alt="" style="max-height:60px">` : ""], ["Date signed", esc(ukDate(job.sigDate))]])}
 ${job.handover && job.handover.name ? `<h2>Received by</h2>${kv([["Name", esc(job.handover.name)], ["Date", esc(ukDate(job.handover.date))], ["Signature", job.handover.sig ? `<img src="${job.handover.sig}" alt="" style="max-height:60px">` : ""]])}` : ""}
 ${photosSectionHtml(job, false)}
 <footer>${esc(co.company || "BlueForge Engineering")} – ${esc(F.name)} ${esc(job.reportNo || "")} – ${esc(job.address || "")}</footer></body></html>`;
+}
+
+/* ---------------- customers (built from the jobs) */
+function custKey(j){ const c = j.client || {}; return (String(c.name || "").trim().toLowerCase().replace(/\s+/g, " ") || String(c.email || "").trim().toLowerCase() || String(c.phone || "").replace(/\D/g, "") || "addr:" + normAddr(j.address || "")); }
+function customers(){
+  const map = new Map();
+  liveJobs().filter(j => !j.example && (j.client && (j.client.name || j.client.email || j.client.phone) || j.address)).forEach(j => {
+    const k = custKey(j); if (k === "addr:") return;
+    const c = map.get(k) || { key: k, name: "", phone: "", email: "", addrs: new Set(), jobs: [], owed: 0, last: "" };
+    const cl = j.client || {}; c.name = c.name || cl.name || ""; c.phone = c.phone || cl.phone || ""; c.email = c.email || cl.email || "";
+    if (j.address) c.addrs.add(j.address.split("\n")[0]);
+    c.jobs.push(j); if (String(j.inspDate || "") > c.last) c.last = String(j.inspDate || "");
+    if (j.invoice && j.invoice.status !== "Paid" && j.invoice.status !== "Draft") c.owed += totals(j.invoice.lines || []).total;
+    map.set(k, c);
+  });
+  return [...map.values()].sort((a, b) => b.last.localeCompare(a.last));
+}
+function renderCustomers(){
+  const q = String(view.custQ || "").toLowerCase(), list = customers().filter(c => !q || [c.name, c.phone, c.email, ...c.addrs].join(" ").toLowerCase().includes(q));
+  return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Customers<span class="sub">From your jobs</span></h1></header>
+  <main><label class="field"><span>Search</span><input id="custq" data-local="custQ" value="${esc(view.custQ || "")}" placeholder="Name, phone, street…"></label>
+    <div id="custlist">${custListHtml(list)}</div></main>`;
+}
+function custListHtml(list){
+  if (!list.length) return `<div class="empty">No customers yet – they appear here as you add client details to jobs.</div>`;
+  return list.map(c => `<button class="card-link" data-act="cust" data-k="${esc(c.key)}"><div class="grow"><div class="t">${esc(c.name || [...c.addrs][0] || "No name")}</div><div class="d">${esc([...c.addrs].slice(0, 2).join(" · "))}</div><div class="d">${c.jobs.length} job${c.jobs.length === 1 ? "" : "s"}${c.last ? " · last " + esc(ukDate(c.last)) : ""}</div></div>${billingOk() && c.owed > 0 ? pill("check", money(c.owed) + " owed") : ""}</button>`).join("");
+}
+function renderCustomer(){
+  const c = customers().find(x => x.key === view.custKey);
+  if (!c) { view = {screen:"customers"}; return renderCustomers(); }
+  const tel = c.phone.replace(/\s/g, "");
+  return `<header class="top"><button class="iconbtn" data-act="customers" aria-label="Back">←</button><h1>${esc(c.name || "Customer")}<span class="sub">${c.jobs.length} job${c.jobs.length === 1 ? "" : "s"}</span></h1></header>
+  <main><div class="card"><h2>Contact</h2>
+      ${c.phone ? `<div>${esc(c.phone)}</div>` : ""}${c.email ? `<div>${esc(c.email)}</div>` : ""}${!c.phone && !c.email ? `<div class="muted small">No phone or email saved.</div>` : ""}
+      <div class="row">${tel ? `<a class="btn ghost sm" href="tel:${esc(tel)}">Call</a><a class="btn ghost sm" href="sms:${esc(tel)}">Text</a>` : ""}${c.email ? `<a class="btn ghost sm" href="mailto:${esc(c.email)}">Email</a>` : ""}</div>
+      ${billingOk() && c.owed > 0 ? `<div class="warnline">${money(c.owed)} invoiced and not yet paid.</div>` : ""}</div>
+    <div class="card"><h2>Addresses</h2>${[...c.addrs].map(a => `<div class="row"><span style="flex:1">${esc(a)}</span><a class="btn ghost sm" href="https://maps.google.com/?q=${encodeURIComponent(a)}" target="_blank" rel="noopener">Map</a></div>`).join("") || `<div class="muted small">None saved.</div>`}</div>
+    <div class="card"><h2>Jobs</h2>${c.jobs.sort((a, b) => String(b.inspDate).localeCompare(String(a.inspDate))).map(j => `<button class="card-link" data-act="open" data-id="${esc(j.id)}"><div class="grow"><div class="t">${esc(TYPES[typeOf(j)])} · ${esc(ukDate(j.inspDate))}</div><div class="d">${esc(j.reportNo || "")} · ${esc(jobTitle(j))}</div></div>${jobPill(j)}</button>`).join("")}</div>
+    <div class="card"><h2>New job for ${esc(c.name || "this customer")}</h2><div class="muted small">Starts with their name, phone, email and address filled in.</div>
+      <div class="chips">${Object.keys(TYPES).map(t => `<button class="chip" data-act="custNew" data-type="${esc(t)}">${esc(TYPES[t])}</button>`).join("")}</div></div>
+  </main>`;
 }
 
 /* ---------------- training (EWA / AM2E / 2391) */
@@ -2375,6 +2441,8 @@ function render(){
   else if (view.screen === "due") html = renderDue();
   else if (view.screen === "ask") html = renderAsk();
   else if (view.screen === "train") html = renderTrain();
+  else if (view.screen === "customers") html = renderCustomers();
+  else if (view.screen === "customer") html = renderCustomer();
   else if (view.screen === "quiz" && view.quiz) { html = renderQuiz(); if (view.quiz.limitMin && !view.quiz.done) setTimeout(tickQuiz, 0); }
   else if (view.screen === "am2e") html = renderAm2e();
   else if (view.screen === "money") html = billingOk() ? renderMoney() : renderHome();
@@ -2392,7 +2460,7 @@ function rerender(){ view.keepScroll = true; render(); }
 function jobPill(j){
   const s = jobSummary(j), t = typeOf(j);
   if (j.handoff && !j.sig && billingOk()) return pill("check","Ready to sign");
-  if (FORMS[t]) return s.form.outcome ? pill(s.form.outcome === "Unsatisfactory" ? "fail" : "pass", s.form.outcome.toUpperCase()) : pill("none","In progress");
+  if (FORMS[t]) return s.form.outcome ? pill(formBad(FORMS[t], s.form.outcome) ? "fail" : s.form.outcome === "Draft" ? "none" : "pass", s.form.outcome.toUpperCase()) : pill("none","In progress");
   if (t === "PAT") return s.total ? pill(s.pat.fail ? "fail" : s.status === "pass" ? "pass" : "none", `${s.pat.pass} pass · ${s.pat.fail} fail`) : pill("none","In progress");
   if (t === "EICR") return s.status === "fail" ? pill("fail","UNSATISFACTORY") : s.status === "pass" && s.tested ? pill("pass","SATISFACTORY") : pill("none","In progress");
   return s.status === "fail" ? pill("fail","TEST FAILURES") : s.status === "pass" ? pill("pass","ALL PASSED") : pill("none","In progress");
@@ -2431,6 +2499,7 @@ function renderHome(){
       <button class="tile" data-act="codes"><b>Coding guide</b><span>Search C1 · C2 · C3 · FI</span></button>
       <button class="tile" data-act="ask"><b>Ask the regs</b><span>AI answers with reg numbers</span></button>
       <button class="tile" data-act="train"><b>Training</b><span>EWA · AM2E · 2391 practice</span></button>
+      <button class="tile" data-act="customers"><b>Customers</b><span>Contacts, addresses, job history</span></button>
       ${billingOk() ? "" : "<!--"}<button class="tile" data-act="money"><b>Quotes &amp; invoices</b><span>${(() => { const u = liveJobs().filter(x => x.invoice && x.invoice.status !== "Paid"); return u.length ? u.length + " unpaid" : "Nothing owed"; })()}</span></button>${billingOk() ? "" : "-->"}
       <button class="tile" data-act="due"><b>Due soon</b><span>${dueList().length} re-inspection${dueList().length === 1 ? "" : "s"} to chase</span></button>
     </div>
@@ -2527,7 +2596,7 @@ const TABS = {
   MW:   [["job","Work"],["supply","Supply"],["circuits","Circuit"],["photos","Photos"],["cert","Certify"]],
   PAT:  [["job","Site"],["pat","Items"],["photos","Photos"],["cert","Certify"]]
 };
-Object.entries(window.BF_FORMS || {}).forEach(([k, f]) => { TABS[k] = [["job","Site"],["form","Details"],["checks","Checks"]].concat(f.tables.length ? [["sched", f.tables[0].row + "s"]] : []).concat([["photos","Photos"],["cert","Certify"]]); });
+Object.entries(window.BF_FORMS || {}).forEach(([k, f]) => { const L = f.tabs || {}; TABS[k] = [["job","Site"],["form", L.form || "Details"],["checks", L.checks || "Checks"]].concat(f.tables.length ? [["sched", L.sched || f.tables[0].row + "s"]] : []).concat([["photos","Photos"],["cert", f.noun === "document" ? "Issue" : "Certify"]]); });
 function renderJob(){
   const job = curJob();
   const t = typeOf(job);
@@ -2632,7 +2701,7 @@ function tabCert(){
 
 /* ---------------- finishing: shared by all report types */
 function finishCard(job){
-  const t = typeOf(job), noun = t === "EICR" ? "report" : "certificate";
+  const t = typeOf(job), noun = t === "EICR" ? "report" : (FORMS[t] && FORMS[t].noun) || "certificate";
   if (job.example) return `<div class="card"><h2>Finished ${noun}</h2><button class="btn block ghost" data-act="print">Print / save as PDF</button></div>`;
   const tester = !billingOk();
   const main = tester
@@ -2679,7 +2748,10 @@ function resTableHtml(){
   <p class="muted small">Common T&amp;E pairs (R1+R2 mΩ/m): 1.0/1.0 = 36.20 · 1.5/1.0 = 30.20 · 2.5/1.5 = 19.51 · 4/1.5 = 16.71 · 6/2.5 = 10.49 · 10/4 = 6.44 · 16/6 = 4.23</p>`;
 }
 function calcHtml(){
-  const c = view.calc || (view.calc = {vdCsa:"2.5", vdIb:"", vdL:"", vdType:"Other", adZs:"", adT:"0.1", adK:"115", dcKw:"", dcPh:"1", dcPf:"1"});
+  const c = view.calc || (view.calc = {});
+  Object.entries({vdCsa:"2.5", vdIb:"", vdL:"", vdType:"Other", adZs:"", adT:"0.1", adK:"115", dcKw:"", dcPh:"1", dcPf:"1", zsDev:"BS EN 60898 MCB Type B", zsIn:"32", zsT:"0.4",
+    lpLive:"2.5", lpCpc:"1.5", lpL:"", lpZe:"", lpHot:"Yes", pfZ:"", pfPh:"1", rgR1:"", rgRn:"", rgR2:"", ttI:"30", irA:"", irB:"", irC:"", czIn:"", czCa:"1", czCg:"1", czCi:"1", czCc:"1",
+    mdLt:"", mdHt:"", mdCk:"", mdCkS:"No", mdSk:"", mdSkN:"", mdWh:"", mdSh:"", mdEv:"", owV:"", owI:"", owR:""}).forEach(([k, v]) => { if (c[k] === undefined) c[k] = v; });
   const inp = (label, key, unit) => `<label class="field" for="calc-${key}"><span>${esc(label)}</span><div class="unit"><input id="calc-${key}" class="num" inputmode="decimal" data-calc="${key}" value="${esc(c[key])}"><em>${esc(unit)}</em></div></label>`;
   const ch = (label, key, opts) => `<div class="field"><span>${esc(label)}</span><div class="chips">${opts.map(o => `<button type="button" class="chip small" data-calcchip="${key}" data-val="${esc(o)}" aria-pressed="${String(c[key]) === String(o)}">${esc(o)}</button>`).join("")}</div></div>`;
   return `<div class="card"><h2>Voltage drop (T&amp;E)</h2>
@@ -2694,8 +2766,73 @@ function calcHtml(){
   <div class="card"><h2>Design current</h2>
     <div class="grid2">${inp("Load","dcKw","kW")}${inp("Power factor","dcPf","")}</div>
     ${ch("Phases","dcPh",["1","3"])}
-    <div class="auto" id="calc-dc">${calcDc()}</div></div>`;
+    <div class="auto" id="calc-dc">${calcDc()}</div></div>
+  <div class="card"><h2>Max Zs lookup</h2>
+    <label class="field"><span>Device</span><select data-calc="zsDev">${Object.keys(ZS).map(d => `<option${c.zsDev === d ? " selected" : ""}>${esc(d)}</option>`).join("")}</select></label>
+    <div class="grid2">${inp("Rating","zsIn","A")}</div>${ch("Disconnection time","zsT",["0.4","5"])}
+    <div class="auto" id="calc-zs">${calcZs()}</div><div class="muted small">BS 7671 Tables 41.2–41.4 (Cmin 0.95). The 80% figure is the GN3 rule of thumb for readings taken at room temperature.</div></div>
+  <div class="card"><h2>R1+R2 and Zs from cable length</h2>
+    ${ch("Line (mm²)","lpLive",CSA)}${ch("cpc (mm²)","lpCpc",CSA)}
+    <div class="grid2">${inp("Length","lpL","m")}${inp("Ze / Zdb","lpZe","Ω")}</div>${ch("At operating temperature (×1.2)","lpHot",["Yes","No"])}
+    <div class="auto" id="calc-lp">${calcLp()}</div><div class="muted small">Copper resistance at 20 °C (mΩ/m per conductor). ×1.2 converts to 70 °C for comparing with the BS 7671 maximum.</div></div>
+  <div class="card"><h2>Prospective fault current</h2>
+    <div class="grid2">${inp("Loop impedance Zs or Ze","pfZ","Ω")}</div>${ch("Supply","pfPh",["1","3"])}
+    <div class="auto" id="calc-pf">${calcPf()}</div><div class="muted small">PFC = Uo ÷ Z. For three-phase, the common site approximation is 2 × the single-phase PSCC – use a measured value where you can.</div></div>
+  <div class="card"><h2>Ring final continuity</h2>
+    <div class="grid2">${inp("r1 (line end-to-end)","rgR1","Ω")}${inp("rn (neutral end-to-end)","rgRn","Ω")}</div><div class="grid2">${inp("r2 (cpc end-to-end)","rgR2","Ω")}</div>
+    <div class="auto" id="calc-rg">${calcRg()}</div></div>
+  <div class="card"><h2>TT earth electrode</h2>${ch("RCD IΔn (mA)","ttI",["30","100","300","500"])}
+    <div class="auto" id="calc-tt">${calcTt()}</div><div class="muted small">RA × IΔn ≤ 50 V (Reg 411.5.3). Above 200 Ω the electrode may not be stable – GN3 guidance.</div></div>
+  <div class="card"><h2>Insulation resistance in parallel</h2>
+    <div class="grid2">${inp("Circuit A","irA","MΩ")}${inp("Circuit B","irB","MΩ")}</div><div class="grid2">${inp("Circuit C (optional)","irC","MΩ")}</div>
+    <div class="auto" id="calc-ir">${calcIr()}</div><div class="muted small">1/Rt = 1/R1 + 1/R2 + … – why a whole board reads lower than any one circuit.</div></div>
+  <div class="card"><h2>Tabulated current needed (It)</h2>
+    <div class="grid2">${inp("Device rating In","czIn","A")}${inp("Ca (ambient)","czCa","")}</div><div class="grid2">${inp("Cg (grouping)","czCg","")}${inp("Ci (insulation)","czCi","")}</div>${inp("Cc (0.725 BS 3036, else 1)","czCc","")}
+    <div class="auto" id="calc-cz">${calcCz()}</div><div class="muted small">It ≥ In ÷ (Ca × Cg × Ci × Cc). Then pick a cable from the BS 7671 Appendix 4 table for your installation method with It at least this.</div></div>
+  <div class="card"><h2>Maximum demand (domestic, with diversity)</h2>
+    <div class="grid2">${inp("Lighting total","mdLt","kW")}${inp("Heating & fixed power","mdHt","kW")}</div>
+    <div class="grid2">${inp("Cooker(s) total","mdCk","kW")}${ch("Cooker has a socket","mdCkS",["Yes","No"])}</div>
+    <div class="grid2">${inp("Socket circuits – largest","mdSk","A")}${inp("Other socket circuits (sum of ratings)","mdSkN","A")}</div>
+    <div class="grid2">${inp("Water heater (thermostatic)","mdWh","kW")}${inp("Electric shower(s) – largest","mdSh","kW")}</div>${inp("EV charger (no diversity)","mdEv","A")}
+    <div class="auto" id="calc-md">${calcMd()}</div><div class="muted small">On-Site Guide Appendix A diversity for households (lighting 66%; heating 10 A + 50% of the rest; cooking 10 A + 30% of the rest + 5 A for a cooker socket; largest socket circuit 100% + 40% of the others; shower and water heater 100%). A guide only – check it against your copy of the OSG and the DNO fuse.</div></div>
+  <div class="card"><h2>Ohm's law &amp; power</h2><div class="muted small">Fill in any two.</div>
+    <div class="grid2">${inp("Voltage","owV","V")}${inp("Current","owI","A")}</div>${inp("Resistance","owR","Ω")}
+    <div class="auto" id="calc-ow">${calcOw()}</div></div>`;
 }
+const f2 = (x, d = 2) => Number(x).toFixed(d);
+function calcZs(){ const c = view.calc, t = ZS[c.zsDev], r = t && t[+c.zsIn]; if (!t) return "";
+  if (!r) return `<span class="muted">No table value for ${esc(c.zsIn)} A – ratings: ${Object.keys(t).join(", ")}</span>`;
+  const v = c.zsT === "5" ? r[1] : r[0]; if (v == null) return `<span class="muted">No ${c.zsT} s value for this rating</span>`;
+  return `Max Zs <b>${f2(v)} Ω</b> · 80% for measured readings <b>${f2(v * 0.8)} Ω</b>`; }
+function calcLp(){ const c = view.calc, L = num(c.lpL), a = RES[c.lpLive], b = RES[c.lpCpc]; if (L === null || !a || !b) return `<span class="muted">Enter the length</span>`;
+  const r = (a + b) * L / 1000, rh = c.lpHot === "Yes" ? r * 1.2 : r, ze = num(c.lpZe);
+  return `R1+R2 = (${a} + ${b}) × ${L} ÷ 1000 = <b>${f2(r, 3)} Ω</b>${c.lpHot === "Yes" ? ` → ×1.2 = <b>${f2(rh, 3)} Ω</b>` : ""}${ze !== null ? `<br>Zs = ${ze} + ${f2(rh, 3)} = <b>${f2(ze + rh)} Ω</b>` : ""}`; }
+function calcPf(){ const c = view.calc, z = num(c.pfZ); if (!z) return `<span class="muted">Enter an impedance</span>`;
+  const i = 230 / z / 1000; return c.pfPh === "3" ? `Single-phase ${f2(i)} kA → three-phase approx <b>${f2(i * 2)} kA</b>` : `PFC = 230 ÷ ${z} = <b>${f2(i)} kA</b>`; }
+function calcRg(){ const c = view.calc, r1 = num(c.rgR1), rn = num(c.rgRn), r2 = num(c.rgR2); if (r1 === null || rn === null) return `<span class="muted">Enter r1 and rn</span>`;
+  const out = [`r1 and rn ${Math.abs(r1 - rn) <= 0.05 ? pill("pass","within 0.05 Ω") : pill("fail","differ by " + f2(Math.abs(r1 - rn)) + " Ω – check for a break or bad joint")}`, `Expected L–N at each socket ≈ (r1 + rn) ÷ 4 = <b>${f2((r1 + rn) / 4, 3)} Ω</b>`];
+  if (r2 !== null) { out.push(`Expected R1+R2 at each socket ≈ (r1 + r2) ÷ 4 = <b>${f2((r1 + r2) / 4, 3)} Ω</b>`); out.push(`r2 ÷ r1 = ${f2(r2 / r1)} (≈1.67 for 2.5/1.5 T&amp;E, 1.0 for singles)`); }
+  return out.join("<br>"); }
+function calcTt(){ const c = view.calc, i = num(c.ttI); if (!i) return ""; const ra = 50 / (i / 1000); return `Max RA = 50 ÷ ${i / 1000} = <b>${Math.round(ra)} Ω</b>${ra > 200 ? " (aim for 200 Ω or less for a stable electrode)" : ""}`; }
+function calcIr(){ const c = view.calc, v = [c.irA, c.irB, c.irC].map(num).filter(x => x); if (v.length < 2) return `<span class="muted">Enter at least two readings</span>`;
+  const t = 1 / v.reduce((a, x) => a + 1 / x, 0); return `Combined = 1 ÷ (${v.map(x => "1/" + x).join(" + ")}) = <b>${f2(t)} MΩ</b>`; }
+function calcCz(){ const c = view.calc, i = num(c.czIn), k = ["czCa","czCg","czCi","czCc"].map(x => num(c[x]) || 1); if (!i) return `<span class="muted">Enter the device rating</span>`;
+  const f = k.reduce((a, x) => a * x, 1); return `It ≥ ${i} ÷ (${k.join(" × ")}) = ${i} ÷ ${f2(f, 3)} = <b>${f2(i / f, 1)} A</b>`; }
+function calcMd(){ const c = view.calc, A = kw => kw * 1000 / 230, parts = [];
+  const lt = num(c.mdLt), ht = num(c.mdHt), ck = num(c.mdCk), sk = num(c.mdSk), skn = num(c.mdSkN), wh = num(c.mdWh), sh = num(c.mdSh), ev = num(c.mdEv);
+  if (lt) parts.push(["Lighting 66%", A(lt) * 0.66]);
+  if (ht) { const a = A(ht); parts.push(["Heating & power", Math.min(a, 10) + Math.max(0, a - 10) * 0.5]); }
+  if (ck) { const a = A(ck); parts.push(["Cooking", Math.min(a, 10) + Math.max(0, a - 10) * 0.3 + (c.mdCkS === "Yes" ? 5 : 0)]); }
+  if (sk) parts.push(["Sockets", sk + (skn || 0) * 0.4]);
+  if (wh) parts.push(["Water heater", A(wh)]);
+  if (sh) parts.push(["Shower", A(sh)]);
+  if (ev) parts.push(["EV charger", ev]);
+  if (!parts.length) return `<span class="muted">Fill in what's in the property</span>`;
+  const tot = parts.reduce((a, p) => a + p[1], 0);
+  return parts.map(p => `${esc(p[0])}: ${f2(p[1], 1)} A`).join("<br>") + `<br><b>Total ≈ ${f2(tot, 0)} A</b> ${pill(tot <= 60 ? "pass" : tot <= 80 ? "check" : "fail", tot <= 60 ? "fits a 60 A fuse" : tot <= 80 ? "needs 80 A+" : "over 80 A – ask the DNO")}`; }
+function calcOw(){ const c = view.calc, V = num(c.owV), I = num(c.owI), R = num(c.owR); let v = V, i = I, r = R;
+  if (v !== null && i !== null) r = v / i; else if (v !== null && r !== null) i = v / r; else if (i !== null && r !== null) v = i * r; else return `<span class="muted">Fill in any two</span>`;
+  return `V = <b>${f2(v)} V</b> · I = <b>${f2(i, 3)} A</b> · R = <b>${f2(r, 3)} Ω</b> · P = <b>${f2(v * i, 1)} W</b>`; }
 function calcVd(){ const c = view.calc, ib = num(c.vdIb), l = num(c.vdL), mv = VD_MVAM[c.vdCsa]; if (ib === null || l === null || !mv) return `<span class="muted">Enter current and length</span>`;
   const v = mv*ib*l/1000, lim = c.vdType === "Lighting" ? 6.9 : 11.5; return `${v.toFixed(2)} V (${(v/2.3).toFixed(1)}%) ${pill(v <= lim ? "pass" : "fail", v <= lim ? `within ${lim} V` : `over ${lim} V`)}`; }
 function calcAd(){ const c = view.calc, zs = num(c.adZs), t = num(c.adT), k = num(c.adK); if (!zs || !t || !k) return `<span class="muted">Enter Zs and time</span>`;
@@ -2706,7 +2843,7 @@ function renderBook(){
   const ch = BF_BOOK.find(b => b.id === view.chapter);
   if (!ch && view.chapter !== "calc") return `<header class="top"><button class="iconbtn" data-act="home" aria-label="Back">←</button><h1>Handbook<span class="sub">On-site guide</span></h1></header>
   <main><div class="muted small">Practical reminders in plain English. BS 7671 and the manufacturer's data always come first.</div>
-    <button class="card-link" data-act="chapter" data-id="calc"><div class="grow"><div class="t">Calculators</div><div class="d">Voltage drop · adiabatic · design current</div></div></button>
+    <button class="card-link" data-act="chapter" data-id="calc"><div class="grow"><div class="t">Calculators</div><div class="d">Volt drop · adiabatic · max Zs · R1+R2 · PFC · rings · TT · IR · It · max demand · Ohm's law</div></div></button>
     ${BF_BOOK.map(b => `<button class="card-link" data-act="chapter" data-id="${b.id}"><div class="grow"><div class="t">${esc(b.t)}</div></div></button>`).join("")}</main>`;
   const body = view.chapter === "calc" ? calcHtml() : `<div class="card book">${ch.h.replace("{{ZS_TABLE}}", zsTableHtml()).replace("{{RES_TABLE}}", resTableHtml())}</div>`;
   return `<header class="top"><button class="iconbtn" data-act="bookHome" aria-label="Back to contents">←</button><h1>${esc(ch ? ch.t : "Calculators")}<span class="sub">Handbook</span></h1></header><main>${body}</main>`;
@@ -2944,11 +3081,12 @@ document.addEventListener("input", e => {
     view[loc.dataset.local] = loc.value;
     if (loc.dataset.local === "homeQ") { const l = document.getElementById("homelist"); if (l) l.innerHTML = homeList(); }
     else if (loc.dataset.local === "codeQ") { const l = document.getElementById("codelist"); if (l) l.innerHTML = codeListHtml(); }
+    else if (loc.dataset.local === "custQ") { const q = String(view.custQ || "").toLowerCase(), l = document.getElementById("custlist"); if (l) l.innerHTML = custListHtml(customers().filter(c => !q || [c.name, c.phone, c.email, ...c.addrs].join(" ").toLowerCase().includes(q))); }
     else rerender();
     return;
   }
   const cin = e.target.closest("[data-calc]");
-  if (cin) { view.calc[cin.dataset.calc] = cin.value; const u = (id, f) => { const el = document.getElementById(id); if (el) el.innerHTML = f(); }; u("calc-vd", calcVd); u("calc-ad", calcAd); u("calc-dc", calcDc); return; }
+  if (cin) { view.calc[cin.dataset.calc] = cin.value; const u = (id, f) => { const el = document.getElementById(id); if (el) el.innerHTML = f(); }; [["calc-vd", calcVd], ["calc-ad", calcAd], ["calc-dc", calcDc], ["calc-zs", calcZs], ["calc-lp", calcLp], ["calc-pf", calcPf], ["calc-rg", calcRg], ["calc-tt", calcTt], ["calc-ir", calcIr], ["calc-cz", calcCz], ["calc-md", calcMd], ["calc-ow", calcOw]].forEach(([id, f]) => u(id, f)); return; }
   const el = e.target.closest("[data-bind]"); if (!el) return;
   const [root, ...rest] = el.dataset.bind.split(".");
   const obj = roots()[root]; if (!obj) return;
@@ -3061,6 +3199,9 @@ document.addEventListener("click", e => {
     case "aiOff": (async () => { try { await api("setAiKey", { aiKey: "" }); settings.aiReady = false; lsWrite(); rerender(); toast("AI key removed"); } catch(err){ toast(String(err.message || err)); } })(); break;
     case "formAllOk": { const F = FORMS[typeOf(job)], f = formInit(job), c = F.checks.find(x => x.id === a.dataset.c); if (c) c.items.forEach(([id]) => { if (!f.chk[c.id + "_" + id]) f.chk[c.id + "_" + id] = "✓"; }); markDirty(job); rerender(); break; }
     case "formRole": { const f = formInit(job), r = a.dataset.r, i = f.roles.indexOf(r); if (i >= 0) f.roles.splice(i, 1); else f.roles.push(r); markDirty(job); rerender(); break; }
+    case "presetOpen": view.presetOpen = view.presetOpen === a.dataset.t ? null : a.dataset.t; rerender(); break;
+    case "frowPreset": { const F = FORMS[typeOf(job)], t = F.tables.find(x => x.id === a.dataset.t), p = t && t.presets[+a.dataset.i]; if (!p) break; const f = formInit(job); (f.rows[t.id] = f.rows[t.id] || []).push(Object.assign({}, p)); markDirty(job); rerender(); break; }
+    case "formAi": formAi(); break;
     case "frowAdd": { const f = formInit(job), rows = f.rows[a.dataset.t] = f.rows[a.dataset.t] || []; rows.push({ ref: String(rows.length + 1) }); view.frowOpen = a.dataset.t + ":" + (rows.length - 1); markDirty(job); rerender(); break; }
     case "frowDup": { const f = formInit(job), rows = f.rows[a.dataset.t], src = rows[+a.dataset.i]; const n = Object.assign({}, src, { ref: String(rows.length + 1), res: "" }); rows.push(n); view.frowOpen = a.dataset.t + ":" + (rows.length - 1); markDirty(job); rerender(); break; }
     case "frowDel": { const f = formInit(job); f.rows[a.dataset.t].splice(+a.dataset.i, 1); view.frowOpen = null; markDirty(job); rerender(); break; }
@@ -3081,6 +3222,10 @@ document.addEventListener("click", e => {
     case "due": view = {screen:"due"}; render(); break;
     case "ask": view = {screen:"ask"}; render(); break;
     case "train": view = {screen:"train"}; render(); break;
+    case "customers": view = {screen:"customers", custQ: view.custQ || ""}; render(); break;
+    case "cust": view = {screen:"customer", custKey: a.dataset.k}; render(); break;
+    case "custNew": { const c = customers().find(x => x.key === view.custKey); const nj = newJob(a.dataset.type); if (c) { nj.client = Object.assign(nj.client || {}, { name: c.name, phone: c.phone, email: c.email, address: (c.jobs[0].client && c.jobs[0].client.address) || "" }); nj.address = c.jobs.slice().sort((x, y) => String(y.inspDate).localeCompare(String(x.inspDate)))[0].address || ""; }
+      jobs.push(nj); markDirty(nj); assignNumber(nj); view = {screen:"job", jobId:nj.id, tab:"job", board:0, circ:null}; render(); break; }
     case "am2e": view = {screen:"am2e"}; render(); break;
     case "trQuick": startQuiz("practice", pickQuick(10), "Quick 10"); break;
     case "trCards": startQuiz("practice", dueIds().slice(0, 20), "Revise"); break;
