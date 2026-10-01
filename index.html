@@ -399,10 +399,12 @@ details.fault ol{margin:0;padding-left:20px}
 .wdev{cursor:pointer}
 .wchips .chip{min-height:40px}
 .wh{font-family:var(--f-display);font-size:18px;margin:6px 0 0}
+.wreal + .wreal{border-top:1px solid var(--line);padding-top:14px;margin-top:6px}
 .wlist{border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--field);margin-bottom:8px}
 .wlist.on{border-color:var(--blue);box-shadow:0 0 14px var(--glow-soft)}
 .wlist h4{margin:0 0 6px;font-family:var(--f-display);font-size:16px}
 .wlist table td:first-child{white-space:nowrap}
+.wrow{padding:7px 0;border-top:1px solid var(--line);font-size:15px;line-height:1.35}.wrow:first-of-type{border-top:0}.wrow .arr{color:var(--muted)}
 </style>
 </head><body>
 
@@ -439,6 +441,7 @@ window.__bfStart = Date.now();
 
 <script src="bf-data.js"></script>
 <script src="bf-heat.js"></script>
+<script src="bf-diag.js"></script>
 <script src="bf-train.js"></script>
 <script src="bf-forms.js"></script>
 <script src="bf-nvq.js"></script>
